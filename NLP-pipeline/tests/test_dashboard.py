@@ -71,7 +71,7 @@ def test_every_number_on_the_dashboard_is_exposed_by_a_program_of_the_stack():
 
 
 def test_the_numbers_of_the_new_processor_are_on_the_dashboard():
-    # the dashboard has to show what this stack is about: windows, the three detectors, LogBERT's time, and the lines that needed care
+    # the dashboard has to show what this stack is about: windows, the ones LogBERT flagged, LogBERT's time, and the lines that needed care
     asked = " ".join(t["expr"] for p in charts() for t in p["targets"])
 
     for number in ("processor_windows_total", "processor_windows_flagged_total", "processor_window_score_seconds_bucket", "processor_unseen_lines_total",
@@ -79,12 +79,12 @@ def test_the_numbers_of_the_new_processor_are_on_the_dashboard():
         assert number in asked, number
 
 
-def test_the_detectors_on_the_dashboard_are_the_ones_the_processor_counts():
+def test_the_detector_on_the_dashboard_is_the_one_the_processor_counts():
     source = (PIPELINE / "processor" / "processor.py").read_text(encoding="utf-8")
-    counted = set(re.findall(r'"(\w+)"', re.search(r"for detector in \(([^)]*)\)", source).group(1)))
+    counted = set(re.findall(r'FLAGGED\.labels\("(\w+)"\)', source))
     asked = set(re.findall(r'detector="(\w+)"', " ".join(t["expr"] for p in charts() for t in p["targets"])))
 
-    assert counted == {"keyword", "llm", "logbert"} and asked == counted
+    assert counted == {"logbert"} and asked == counted
 
 
 def test_what_belongs_to_another_stack_is_gone():

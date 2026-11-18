@@ -50,7 +50,7 @@ jobs:
       - name: Check that the files this image needs are committed
         run: |
           case "${{ matrix.component }}" in
-            processor) files="drain.pkl model.pt rules.json llm_rule_based_decisions.csv settings.json" ;;
+            processor) files="drain.pkl model.pt settings.json" ;;
             producer) files="bgl-replay.log" ;;
             *) files="" ;;
           esac
@@ -103,7 +103,7 @@ jobs:
           docker run --rm "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}" python -c "
           import engine
           d = engine.Detectors.load('/bundle')
-          print('the models load:', len(d.extractor.templates), 'templates,', len(d.logbert.vocab.keys), 'LogBERT keys,', len(d.keyword.rules), 'keyword rules,', len(d.llm), 'saved LLM decisions; g =', d.g, ', r =', d.r)
+          print('the models load:', len(d.extractor.templates), 'templates,', len(d.logbert.vocab.keys), 'LogBERT keys; g =', d.g, ', r =', d.r)
           print('a test line:', d.classify('data TLB error interrupt'))
           "
 

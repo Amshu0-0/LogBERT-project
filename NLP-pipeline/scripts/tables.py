@@ -5,7 +5,7 @@ import csv
 from pathlib import Path
 
 # The detectors, in the order of the table. The names are the ones restapi/summary.py gives them.
-ORDER = ("logbert", "llm", "keyword")
+ORDER = ("logbert",)
 
 
 def percent(value):
@@ -26,12 +26,12 @@ def detector_table(summary):
 # Everything one summary says, as lines of text.
 def describe(summary):
     run, lines, speed = summary["run"], summary["lines"], summary["logbert_ms_per_window"]
-    unseen, nodecision = lines["template_not_known"], lines["llm_has_no_saved_decision"]
+    unseen = lines["template_not_known"]
     out = [
         f"Replay {run['run']}   status: {run.get('status', '?')}",
         f"  log lines: {lines['stored']}, of which with an alert tag (the ground truth): {lines['with_alert_tag']}",
         f"  windows:   {summary['windows']}, of which anomalous (they hold at least one alert line): {summary['anomalous_windows']}",
-        f"  lines whose template Drain does not know: {unseen}.  Lines for which the LLM has no saved decision (counted as not flagged): {nodecision}",
+        f"  lines whose template Drain does not know: {unseen}",
         "",
         *detector_table(summary),
         "",
@@ -41,29 +41,22 @@ def describe(summary):
     return out
 
 
-# The numbers of the NLP project's own evaluation of the same three detectors on its WHOLE test period, from reference/comparison.csv (the
-# first version of the NLP project; its results/comparison.csv holds LogBERT only now). The replay file is a slice of that period, so these
-# are a reference and not a target.
+# The numbers of the NLP project's own evaluation of the same detector on its WHOLE test period, from NLP/results/comparison.csv. The
+# replay file is a slice of that period, so these are a reference and not a target.
 def reference(csv_path):
     path = Path(csv_path)
 
     if not path.is_file():
         return []
 
-    wanted = {"logbert_full": "LogBERT, full coverage (A+)", "llm_rule_based": "rule-guided LLM (B3)", "keyword_rules": "keyword rules (B4)"}
     rows = {r["method"]: r for r in csv.DictReader(path.open(newline="", encoding="utf-8"))}
 
-    if not all(key in rows for key in wanted):
+    if "logbert_full" not in rows:
         return []
 
-    first = rows["logbert_full"]
-    out = [f"For comparison, the NLP project's report on its whole test period ({first['support']} windows; reference/comparison.csv). The replay file is a slice of that period, so the numbers differ:"]
-
-    for key, name in wanted.items():
-        r = rows[key]
-        out.append(f"  {name:<40} precision {float(r['precision']):.3f}   recall {float(r['recall']):.3f}   F1 {float(r['f1']):.3f}")
-
-    return out
+    r = rows["logbert_full"]
+    return [f"For comparison, the NLP project's report on its whole test period ({r['support']} windows; NLP/results/comparison.csv). The replay file is a slice of that period, so the numbers differ:",
+            f"  {'LogBERT, full coverage (A+)':<40} precision {float(r['precision']):.3f}   recall {float(r['recall']):.3f}   F1 {float(r['f1']):.3f}"]
 
 
 # What differs between two summaries of the same replay (for example the laptop's and the cluster's): a list of sentences, empty if nothing.
@@ -74,7 +67,7 @@ def differences(a, b, names=("first", "second")):
         if a[key] != b[key]:
             found.append(f"{key}: {names[0]} {a[key]}, {names[1]} {b[key]}")
 
-    for key in ("stored", "with_alert_tag", "template_not_known", "llm_has_no_saved_decision"):
+    for key in ("stored", "with_alert_tag", "template_not_known"):
         if a["lines"][key] != b["lines"][key]:
             found.append(f"lines.{key}: {names[0]} {a['lines'][key]}, {names[1]} {b['lines'][key]}")
 

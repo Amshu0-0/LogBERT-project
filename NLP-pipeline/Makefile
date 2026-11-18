@@ -1,18 +1,20 @@
-# The NLP log pipeline: the CA3 cluster, with the NLP project's BGL system-log data and detectors in the place of the network flows.
-# Commands build the cluster and the stack, send the log file through it, and show what the detectors said.
+# The NLP log pipeline: the CA3 cluster, with the NLP project's BGL system-log data and LogBERT in the place of the network flows.
+# Commands build the cluster and the stack, send the log file through it, and show what LogBERT said.
 #
 #   Before the cluster (on your computer):
 #   make test          run the tests of the programs (no cluster, no Kafka, no MongoDB needed)
 #   make export-bundle collect the trained models and the log file to replay from your NLP project into bundle/ (README, Step 1)
-#   make local-replay  run the SAME detectors on the replay file here, without a cluster: the numbers the cluster must reproduce
+#   make local-replay  run the SAME LogBERT and windows on the replay file here, without a cluster: the numbers the cluster must reproduce
+#   make live          open the live monitor: the replay file played as a live log, with alerts when LogBERT flags windows (demo/, no cluster)
+#   make demo          open the demo website: look at every window of the replay and try lines of your own (demo/, needs gradio)
 #   make check-images  check that the three images on ghcr.io can be pulled without a login (what the cluster does)
 #
 #   On the cluster:
 #   make cluster-up    Terraform builds the network and 3 machines, Ansible installs Kubernetes (k3s) on them
 #   make up            apply the stack (kubectl apply -k .), wait until it is running. The passwords and certificates are made inside the cluster
 #   make smoke         send ONE tagged log line through producer, Kafka, processor, MongoDB and REST API
-#   make replay        send the whole replay file through the pipeline, wait for the processor, and print what each detector said
-#   make results       print what each detector said about the newest replay (it can be run again at any time)
+#   make replay        send the whole replay file through the pipeline, wait for the processor, and print what LogBERT said
+#   make results       print what LogBERT said about the newest replay (it can be run again at any time)
 #   make rest-check    call the REST API from this computer (HTTPS, with the login), through every node
 #
 #   Afterwards:
@@ -57,6 +59,8 @@ RESULTS_ARGS ?=
 BUNDLE_ARGS  ?=
 NLP_CONFIG   ?= configs/bgl_cpu.yaml
 LOCAL_ARGS   ?=
+DEMO_ARGS    ?=
+LIVE_ARGS    ?=
 TRACE        ?=
 SCAN_ARGS    ?=
 CRASH_ARGS   ?=
@@ -73,7 +77,7 @@ KUBECONFIG = $(CURDIR)/.secrets/kubeconfig.yaml
 export KUBECONFIG
 
 .DEFAULT_GOAL := help
-.PHONY: help validate verify test export-bundle local-replay check-images cluster-key cluster-check cluster-plan cluster-up cluster-status cluster-down \
+.PHONY: help validate verify test export-bundle local-replay live demo check-images cluster-key cluster-check cluster-plan cluster-up cluster-status cluster-down \
     context up status get-all logs diagnose rbac-check rest-check exposure-check images-info down \
     smoke replay results crash-test netpol-check netpol-control heal-check scan scrub teardown dry-run \
     metrics-check logs-trace grafana grafana-login prometheus
@@ -82,7 +86,9 @@ help: ; @printf '%s\n' \
     "  Before the cluster (on your computer, in the Python environment of your NLP project)" \
     "  make test            run the tests of the programs (no cluster needed)" \
     "  make export-bundle   collect the trained models and the replay file from your NLP project into bundle/ (README, Step 1)" \
-    "  make local-replay    run the same detectors on the replay file here: the numbers that the cluster must reproduce" \
+    "  make local-replay    run the same LogBERT on the replay file here: the numbers that the cluster must reproduce" \
+    "  make live            open the live monitor: the replay file as a live log, with alerts (http://127.0.0.1:8765; LIVE_ARGS=\"--speed 300 --start\")" \
+    "  make demo            open the demo website (first: pip install -r demo/requirements.txt; DEMO_ARGS=--share for a public link)" \
     "  make check-images    check that the three images on ghcr.io can be pulled without a login" \
     "" \
     "  Cluster (AWS)" \
@@ -97,8 +103,8 @@ help: ; @printf '%s\n' \
     "  Stack (on the cluster)" \
     "  make up              apply the whole stack (the passwords and certificates are made inside the cluster) and wait until it is running" \
     "  make smoke           send one tagged log line through producer, Kafka, processor, MongoDB and REST API" \
-    "  make replay          send the whole replay file through the pipeline, wait for the processor, and print what each detector said" \
-    "  make results         print what each detector said about the newest replay (more: make results RESULTS_ARGS=\"--windows 10\")" \
+    "  make replay          send the whole replay file through the pipeline, wait for the processor, and print what LogBERT said" \
+    "  make results         print what LogBERT said about the newest replay (more: make results RESULTS_ARGS=\"--windows 10\")" \
     "  make rest-check      call the REST API from this computer (HTTPS, with the login), through the node port of every node" \
     "  make dry-run         ask the cluster what the next make up would change, without changing anything (after make up: all unchanged)" \
     "  make status          show everything in the namespace" \
@@ -127,23 +133,29 @@ help: ; @printf '%s\n' \
 # ---------------------------------------------------------------- before the cluster
 
 # The tests start no Kafka, no MongoDB and no Kubernetes: they use stand-ins, and the real models of your NLP project (the committed
-# NLP/results/ next to this folder) for the tests that need them. About 150 tests, about half a minute. Run it from this folder, in a
+# NLP/results/ next to this folder) for the tests that need them. About 260 tests, about a minute and a half. Run it from this folder, in a
 # Python environment that has the packages of requirements-dev.txt (pip install -r requirements-dev.txt).
 test: ; $(PYTHON) -m pytest tests -q
 
-# Collects, from your NLP project (and from reference/: the keyword rules and the saved decisions of its first version), everything the
-# processor and the producer need into bundle/: drain.pkl, model.pt, rules.json, llm_rule_based_decisions.csv, settings.json and the replay
-# file bgl-replay.log. Run it in the environment where "make preprocess" and
-# the training of your NLP project were done. The committed results of your NLP project come from configs/bgl_cpu.yaml (see
-# NLP/results/README.md), so that is the configuration used here. For a run that you made with another one:
+# Collects, from your NLP project, everything the processor and the producer need into bundle/: drain.pkl, model.pt, settings.json and the
+# replay file bgl-replay.log. Run it in the environment where "make preprocess" and the training of your NLP project were done. The committed
+# results of your NLP project come from configs/bgl_cpu.yaml (see NLP/results/README.md), so that is the configuration used here. For a run
+# that you made with another one:
 #   make export-bundle NLP_CONFIG=configs/bgl.yaml BUNDLE_ARGS="--prefer-outputs"
 # The other options are explained at the top of scripts/export-nlp-bundle.py, for example:
 #   make export-bundle BUNDLE_ARGS="--nlp-root ../NLP --lines 30000"
 export-bundle: ; $(PYTHON) scripts/export-nlp-bundle.py --config $(NLP_CONFIG) $(BUNDLE_ARGS)
 
-# The same detectors, the same windows, the same documents as the processor in the cluster, with the replay file as input and dictionaries
+# The same LogBERT, the same windows, the same documents as the processor in the cluster, with the replay file as input and dictionaries
 # instead of Kafka and MongoDB. It prints the table that "make results" prints for the cluster; the two must show the same numbers.
 local-replay: ; $(PYTHON) scripts/local-replay.py $(LOCAL_ARGS)
+
+# The live monitor (demo/live.py): the replay file played into LogBERT as if it were a log that a machine writes right now. A page with the
+# live log, charts and alerts opens at http://127.0.0.1:8765 (press Start there). It needs nothing that this project does not already have.
+live: ; $(PYTHON) demo/live.py $(LIVE_ARGS)
+
+# The demo website (demo/app.py): LogBERT on the replay file, in a browser, with no cluster. It needs gradio:  pip install -r demo/requirements.txt
+demo: ; $(PYTHON) demo/app.py $(DEMO_ARGS)
 
 # The cluster pulls the three images from ghcr.io without a login, so the packages must be public (README, Step 3).
 check-images: ; python3 scripts/check-images.py
@@ -210,7 +222,11 @@ context: ; @if [ ! -f "$(KUBECONFIG)" ]; then echo "There is no cluster yet: $(K
 # kubectl refuses to apply a changed bootstrap Job, the finished Job is deleted and the stack applied again (the Job then finds all 13 Secrets
 # and changes nothing).
 # The replay is not part of this: "make replay" starts it, when you want the data to go through.
-up: context ; ( $(KUBECTL) apply -k . || { echo "kubectl reported an error. If it says that the Job bootstrap cannot be changed, the finished Job is replaced and the stack applied again:" ; \
+# First the three images are looked for on ghcr.io (make check-images): a tag that is not built yet, or a package that is still private,
+# would leave the pods in ImagePullBackOff (the Job bootstrap runs the producer image, so it could never finish). Then the command stops
+# at once and says which image is missing. SKIP_IMAGE_CHECK=1 make up  leaves the look out (no internet, for instance).
+up: context ; ( [ -n "$(SKIP_IMAGE_CHECK)" ] || python3 scripts/check-images.py ) && \
+    ( $(KUBECTL) apply -k . || { echo "kubectl reported an error. If it says that the Job bootstrap cannot be changed, the finished Job is replaced and the stack applied again:" ; \
       $(KUBECTL) -n $(NS) delete job bootstrap --ignore-not-found && $(KUBECTL) apply -k . ; } ) && \
     ( $(KUBECTL) -n $(NS) wait --for=condition=complete job/bootstrap --timeout=300s && \
       $(KUBECTL) -n $(NS) rollout status statefulset/mongo --timeout=420s && \
@@ -265,7 +281,7 @@ replay: context ; $(KUBECTL) -n $(NS) delete job producer-replay --ignore-not-fo
     echo "All lines are in Kafka. The processor is scoring the windows now (minutes). Waiting for it..." && \
     NS=$(NS) KUBECTL=$(KUBECTL) TERRAFORM=$(TERRAFORM) python3 scripts/results.py --replay-job --wait $(RESULTS_WAIT) $(RESULTS_ARGS)
 
-# What each detector said about the newest replay (or the one named with --run). It needs the stack and the REST API, and changes nothing.
+# What LogBERT said about the newest replay (or the one named with --run). It needs the stack and the REST API, and changes nothing.
 results: ; NS=$(NS) KUBECTL=$(KUBECTL) TERRAFORM=$(TERRAFORM) python3 scripts/results.py $(RESULTS_ARGS)
 
 # The kill test: starts a replay, kills the processor when it has stored part of it, waits for the new pod and the end of the replay, and compares.

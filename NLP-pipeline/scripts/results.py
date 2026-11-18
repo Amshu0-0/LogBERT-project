@@ -112,19 +112,18 @@ def clock(epoch):
     return datetime.fromtimestamp(int(epoch), tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
-# The first windows that hold an alert line, with the verdict of each detector.
+# The first windows that hold an alert line, with the verdict of LogBERT.
 def show_windows(name, count):
     body = get("/windows?run=" + name + "&flagged=truth&limit=" + str(count))
-    print("\nThe first " + str(len(body["windows"])) + " windows that hold an alert line (the dataset says: anomalous). 1 = the detector flagged the window:")
-    print("  " + "start (UTC)".ljust(18) + "lines".rjust(7) + "alert lines".rjust(13) + "LogBERT".rjust(9) + "LLM".rjust(6) + "keywords".rjust(10) + "  missed keys")
+    print("\nThe first " + str(len(body["windows"])) + " windows that hold an alert line (the dataset says: anomalous). 1 = LogBERT flagged the window:")
+    print("  " + "start (UTC)".ljust(18) + "lines".rjust(7) + "alert lines".rjust(13) + "LogBERT".rjust(9) + "  missed keys")
 
     for w in body["windows"]:
-        print("  " + clock(w["start"]).ljust(18) + str(w["n_messages"]).rjust(7) + str(w["truth_alerts"]).rjust(13) + str(w["logbert"]).rjust(9) + str(w["llm"]).rjust(6)
-              + str(w["keyword"]).rjust(10) + "  " + str(w["logbert_missed"]))
+        print("  " + clock(w["start"]).ljust(18) + str(w["n_messages"]).rjust(7) + str(w["truth_alerts"]).rjust(13) + str(w["logbert"]).rjust(9) + "  " + str(w["logbert_missed"]))
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Print what the detectors said about a replay.")
+    parser = argparse.ArgumentParser(description="Print what LogBERT said about a replay.")
     parser.add_argument("--run", help="the name of the replay (default: the newest)")
     parser.add_argument("--replay-job", action="store_true", help="the replay that the Job producer-replay started (make replay uses this)")
     parser.add_argument("--wait", type=int, default=0, metavar="SECONDS", help="wait up to this long for the processor to finish the replay")
@@ -160,7 +159,7 @@ def main(argv=None):
         if args.windows:
             show_windows(name, args.windows)
 
-        for text in tables.reference(Path(__file__).resolve().parent.parent / "reference" / "comparison.csv"):
+        for text in tables.reference(Path(__file__).resolve().parent.parent.parent / "NLP" / "results" / "comparison.csv"):
             print(("\n" if text.startswith("For comparison") else "") + text)
 
         problems = []
@@ -182,14 +181,14 @@ def main(argv=None):
             different = tables.differences(local, summary, ("laptop", "cluster"))
 
             if not different:
-                print("\nThe cluster and your computer (" + args.compare + ") give the same numbers for every detector.")
+                print("\nThe cluster and your computer (" + args.compare + ") give the same numbers.")
             else:
                 print("\nThe cluster and your computer (" + args.compare + ") differ in:")
 
                 for line in different:
                     print("  " + line)
 
-                print("  Keyword rules and saved LLM decisions must be identical. LogBERT can differ by a window or two between a Mac (ARM) and the cluster (x86): "
+                print("  The windows and the lines must be identical. LogBERT can differ by a window or two between a Mac (ARM) and the cluster (x86): "
                       "floating-point rounding moves a masked key across the top-g line now and then.")
                 problems += [line for line in different if "LogBERT" not in line]
 

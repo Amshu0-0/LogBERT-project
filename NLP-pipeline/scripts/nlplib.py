@@ -470,7 +470,7 @@ def mongo_lookup(trace):
 
 # A short view of a record (a Kafka message or a stored document): the fields that tell a reader what it is, long texts cut, then a count
 # of the others.
-def trimmed(event, keep=("trace_id", "kind", "run", "smoke", "template_id", "truth", "alert", "keyword", "llm", "line", "content")):
+def trimmed(event, keep=("trace_id", "kind", "run", "smoke", "template_id", "truth", "alert", "line", "content")):
     short = {}
 
     for k in keep:

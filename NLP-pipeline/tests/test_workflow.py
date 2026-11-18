@@ -205,14 +205,15 @@ def test_the_python_of_a_trial_step_survives_the_shell(name):
 def test_the_processor_trial_loads_the_bundle_and_prints_what_it_found(tmp_path, monkeypatch, capsys):
     code, _run = trial_code("Try the processor image")
     bundle = tmp_path / "bundle"
-    make_bundle(bundle, None)
+    make_bundle(bundle)
     texts = template_texts()
     monkeypatch.setattr(engine.TemplateExtractor, "load", staticmethod(lambda path: FakeDrain(texts)))
 
     exec(compile(code.replace("/bundle", str(bundle)), "trial", "exec"), {})
     shown = capsys.readouterr().out
 
-    assert "the models load:" in shown and "LogBERT keys" in shown and "keyword rules" in shown and "saved LLM decisions" in shown and "g = 8" in shown
+    assert "the models load:" in shown and "172 LogBERT keys" in shown and "g = 8" in shown and "r = 8" in shown
+    assert "keyword" not in shown and "LLM" not in shown
     assert "a test line:" in shown
 
 

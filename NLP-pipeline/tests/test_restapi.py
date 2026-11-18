@@ -101,7 +101,7 @@ def test_runs_come_newest_first_without_the_restart_bookkeeping(client, filled):
     assert get(client, "/runs?limit=0")[0] == 400
 
 
-def test_the_summary_is_the_confusion_of_each_detector_on_the_windows_of_a_run(api, client, filled):
+def test_the_summary_is_the_confusion_of_logbert_on_the_windows_of_a_run(api, client, filled):
     status, body = get(client, "/summary?run=run-one")
     expected = summarize(list(filled.windows.find({"run": "run-one"})))
 
@@ -114,8 +114,8 @@ def test_the_summary_is_the_confusion_of_each_detector_on_the_windows_of_a_run(a
         assert found["tp"] + found["fp"] + found["tn"] + found["fn"] == body["windows"]
         assert found == expected["detectors"][field]
 
-    assert body["lines"]["stored"] == 400 and body["lines"]["with_alert_tag"] > 0 and body["lines"]["template_not_known"] == 0
-    assert body["lines"]["llm_has_no_saved_decision"] > 0
+    assert body["lines"] == {"stored": 400, "with_alert_tag": body["lines"]["with_alert_tag"], "template_not_known": 0}
+    assert body["lines"]["with_alert_tag"] > 0
 
     # without ?run= the newest run
     assert get(client, "/summary")[1]["run"]["run"] == "run-two"
@@ -129,7 +129,7 @@ def test_windows_are_in_time_order_and_can_be_filtered(client, filled):
     assert status == 200 and starts == sorted(starts) and "_id" not in body["windows"][0]
     assert body["count"] == len(starts) > 10
 
-    for flagged in ("truth", "logbert", "llm", "keyword"):
+    for flagged in ("truth", "logbert"):
         _, found = get(client, f"/windows?run=run-one&flagged={flagged}&limit=500")
         assert found["count"] > 0 and all(w[flagged] == 1 for w in found["windows"]), flagged
 
@@ -145,7 +145,8 @@ def test_events_are_in_order_and_can_be_filtered(client, filled):
     offsets = [e["offset"] for e in body["events"]]
 
     assert status == 200 and offsets == sorted(offsets) and body["count"] == 400
-    assert {"content", "template_id", "truth", "alert", "keyword", "llm", "node"} <= set(body["events"][0])
+    assert {"content", "template_id", "truth", "alert", "node"} <= set(body["events"][0])
+    assert not {"keyword", "llm", "keyword_rule"} & set(body["events"][0])
 
     _, alerts = get(client, "/events?run=run-one&alert=1&limit=500")
     assert 0 < alerts["count"] < 400 and all(e["alert"] == 1 for e in alerts["events"])

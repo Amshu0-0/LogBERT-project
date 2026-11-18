@@ -15,7 +15,7 @@ def stream(times, size, step):
     found = []
 
     for offset, ts in enumerate(times):
-        status, closed = windower.add(Item(offset, ts, 1, 0, 0, None))
+        status, closed = windower.add(Item(offset, ts, 1, 0))
         assert status == "ok"
         found.extend(closed)
 
@@ -43,9 +43,9 @@ def test_one_message_makes_one_window():
 
 def test_windows_are_complete_only_when_a_later_line_arrives():
     windower = Windower(300, 60)
-    assert windower.add(Item(0, 1000, 1, 0, 0, None)) == ("ok", [])
-    assert windower.add(Item(1, 1299, 1, 0, 0, None)) == ("ok", [])
-    status, closed = windower.add(Item(2, 1300, 1, 0, 0, None))
+    assert windower.add(Item(0, 1000, 1, 0)) == ("ok", [])
+    assert windower.add(Item(1, 1299, 1, 0)) == ("ok", [])
+    status, closed = windower.add(Item(2, 1300, 1, 0))
     assert [w.start for w in closed] == [1000]
     assert [i.offset for i in closed[0].items] == [0, 1]
 
@@ -107,7 +107,7 @@ def test_lines_that_arrive_out_of_order_are_put_where_they_belong():
         found = []
 
         for offset in order:
-            status, closed = windower.add(Item(offset, times[offset], 1, 0, 0, None))
+            status, closed = windower.add(Item(offset, times[offset], 1, 0))
             reordered += status == "reordered"
             found.extend(closed)
 
@@ -120,17 +120,17 @@ def test_lines_that_arrive_out_of_order_are_put_where_they_belong():
 
 def test_a_line_older_than_the_oldest_open_window_is_late_and_not_added():
     windower = Windower(300, 60)
-    windower.add(Item(0, 1000, 1, 0, 0, None))
-    windower.add(Item(1, 1700, 1, 0, 0, None))
-    status, closed = windower.add(Item(2, 1100, 1, 0, 0, None))
+    windower.add(Item(0, 1000, 1, 0))
+    windower.add(Item(1, 1700, 1, 0))
+    status, closed = windower.add(Item(2, 1100, 1, 0))
     assert (status, closed) == ("late", [])
 
 
 def test_after_the_end_nothing_more_is_accepted():
     windower = Windower(300, 60)
-    windower.add(Item(0, 1000, 1, 0, 0, None))
+    windower.add(Item(0, 1000, 1, 0))
     assert len(windower.flush()) == 1
-    assert windower.add(Item(1, 1010, 1, 0, 0, None)) == ("late", [])
+    assert windower.add(Item(1, 1010, 1, 0)) == ("late", [])
     assert windower.flush() == []
 
 
@@ -147,5 +147,5 @@ def test_bad_sizes_are_refused():
 def test_the_first_line_decides_where_the_grid_starts():
     # A replay must begin with its oldest line. If an older line arrives second, it is late: it cannot start a window grid of its own.
     windower = Windower(300, 60)
-    windower.add(Item(0, 1000, 1, 0, 0, None))
-    assert windower.add(Item(1, 990, 1, 0, 0, None)) == ("late", [])
+    windower.add(Item(0, 1000, 1, 0))
+    assert windower.add(Item(1, 990, 1, 0)) == ("late", [])

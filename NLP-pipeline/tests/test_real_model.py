@@ -1,8 +1,7 @@
-# The engine with the real files: the trained LogBERT of the NLP project (model.pt), and the ranked keyword rules (rules.json) and the saved
-# decisions of the rule-guided LLM (llm_rule_based_decisions.csv) from reference/. Only Drain is replaced by a small fake that knows the texts
-# of the saved decisions, because drain.pkl is made by `make preprocess` on the full BGL file and is not part of the repository.
+# The engine with the real trained LogBERT of the NLP project (NLP/results/logbert/model.pt). Only Drain is replaced by a small fake that
+# knows one made-up template text for every key of the model's vocabulary: these tests are about the model, and they must not depend on the
+# bundle/ folder of this computer (conftest.py).
 
-import csv
 import json
 import re
 import shutil
@@ -14,25 +13,20 @@ import pytest
 import engine
 from engine import BundleError, Detectors, Engine, UNSEEN
 from fakes import bgl_line, record
-from baselines import KeywordClassifier, load_rules
 from logad.logbert.dataset import window_to_chunks
 from logad.logbert.trainer import load_checkpoint
 from sink import MemorySink
 
-from conftest import PIPELINE, REPO
+from conftest import REPO
 
-RESULTS = REPO / "NLP" / "results"
-REFERENCE = PIPELINE / "reference"
-FILES = {"model.pt": RESULTS / "logbert" / "model.pt", "rules.json": REFERENCE / "rules.json",
-         "llm_rule_based_decisions.csv": REFERENCE / "llm_rule_based_decisions.csv"}
+FILES = {"model.pt": REPO / "NLP" / "results" / "logbert" / "model.pt"}
 
 pytestmark = pytest.mark.skipif(not all(p.exists() for p in FILES.values()), reason="the NLP project's results are not in this checkout")
 
-SETTINGS = {"keyword_top_k": 30, "logbert": {"g": 8, "r": 8, "mask_ratio": 0.5, "full_coverage": True, "seed": 1234},
-            "window": {"size_seconds": 300, "step_seconds": 60}}
+SETTINGS = {"logbert": {"g": 8, "r": 8, "mask_ratio": 0.5, "full_coverage": True, "seed": 1234}, "window": {"size_seconds": 300, "step_seconds": 60}}
 
 
-# Knows every template that the saved decisions and the model's vocabulary mention (texts of the vocabulary-only keys are made up).
+# Knows the templates that it is given (one text per key of the model's vocabulary).
 class FakeDrain:
     def __init__(self, texts):
         self.templates = dict(texts)
@@ -51,19 +45,13 @@ def content_of(template):
     return template.replace("<*>", "42")
 
 
-def template_texts(path=FILES["llm_rule_based_decisions.csv"]):
-    with open(path, newline="", encoding="utf-8") as f:
-        texts = {int(row["template_id"]): row["template"] for row in csv.DictReader(f)}
-
+def template_texts():
     _model, vocab, _centre, _checkpoint = load_checkpoint(FILES["model.pt"], "cpu")
 
-    for key in vocab.keys:
-        texts.setdefault(key, f"made up template number {key}")
-
-    return texts
+    return {int(key): f"made up template number {key} with <*> in it" for key in vocab.keys}
 
 
-def make_bundle(directory, texts):
+def make_bundle(directory):
     directory.mkdir(parents=True, exist_ok=True)
 
     for name, source in FILES.items():
@@ -76,7 +64,7 @@ def make_bundle(directory, texts):
 @pytest.fixture(scope="module")
 def detectors(tmp_path_factory):
     directory = tmp_path_factory.mktemp("bundle")
-    make_bundle(directory, None)
+    make_bundle(directory)
     texts = template_texts()
 
     patch = pytest.MonkeyPatch()
@@ -92,38 +80,26 @@ def test_the_bundle_loads_with_the_settings_of_the_nlp_project(detectors):
     assert (detectors.g, detectors.r) == (8, 8)
     assert (detectors.size_seconds, detectors.step_seconds) == (300, 60)
     assert detectors.logbert.full_coverage is True and detectors.logbert.mask_ratio == 0.5 and detectors.logbert.seed == 1234
-    assert len(detectors.keyword.rules) == 30
     assert len(detectors.logbert.vocab) == 176
 
 
-def test_one_line_gets_the_same_verdicts_as_the_nlp_code_gives(detectors):
-    rules = load_rules(FILES["rules.json"])[:30]
-    keyword = KeywordClassifier(rules)
-    saved = {i: (label, text) for i, (label, text) in engine.read_llm_decisions(FILES["llm_rule_based_decisions.csv"]).items()}
-    checked = hits = 0
+def test_every_line_of_a_known_template_gets_that_templates_id_and_text(detectors):
+    texts = template_texts()
 
-    for template_id, (label, text) in sorted(saved.items()):
+    for template_id, text in sorted(texts.items()):
         line = detectors.classify(content_of(text))
-        expected = keyword.classify(template_id, text)
 
         assert line.template_id == template_id and line.template == text
-        assert (line.keyword, line.keyword_rule) == (int(expected.label), expected.rule)
-        assert line.llm == label
-        checked += 1
-        hits += line.keyword
 
-    assert checked == len(saved) > 400 and hits > 0
+    assert len(texts) == len(detectors.logbert.vocab.keys) == 172
 
 
-def test_a_line_that_matches_no_template_is_unseen_and_judged_by_its_masked_text(detectors):
+def test_a_line_that_matches_no_template_is_unseen_and_keeps_its_masked_text(detectors):
     line = detectors.classify("a message nobody has ever seen 12345 data TLB error interrupt")
 
-    assert line.template_id == UNSEEN and line.llm is None
+    assert line.template_id == UNSEEN
     assert line.template == "a message nobody has ever seen <*> data TLB error interrupt"
-    assert line.keyword == int(KeywordClassifier(load_rules(FILES["rules.json"])[:30]).classify(UNSEEN, line.template).label)
-
-    plain = detectors.classify("a message that says nothing special 7")
-    assert plain.template_id == UNSEEN and plain.keyword == 0 and plain.keyword_rule is None
+    assert detectors.classify("a message nobody has ever seen 12345 data TLB error interrupt") is line
 
 
 def test_a_window_is_scored_like_the_nlp_code_scores_one_window(detectors):
@@ -215,19 +191,13 @@ def test_the_bundle_must_belong_together(tmp_path):
     patch.setattr(engine.TemplateExtractor, "load", staticmethod(lambda path: FakeDrain(texts)))
 
     try:
-        # a drain.pkl from another preprocessing run: other templates behind the same IDs
-        other = {i: text + " (changed)" if i % 2 else text for i, text in texts.items()}
-        patch.setattr(engine.TemplateExtractor, "load", staticmethod(lambda path: FakeDrain(other)))
-        make_bundle(tmp_path / "wrong", None)
-
-        with pytest.raises(BundleError, match="does not belong"):
-            Detectors.load(tmp_path / "wrong")
-
-        # a drain.pkl that lacks keys that the model knows
-        fewer = {i: t for i, t in texts.items() if i not in (1, 2, 3)}
+        # a drain.pkl that lacks keys that the model knows (it comes from another preprocessing run)
+        make_bundle(tmp_path / "wrong")
+        some = sorted(texts)[:3]
+        fewer = {i: t for i, t in texts.items() if i not in some}
         patch.setattr(engine.TemplateExtractor, "load", staticmethod(lambda path: FakeDrain(fewer)))
 
-        with pytest.raises(BundleError, match="keys of the LogBERT vocabulary"):
+        with pytest.raises(BundleError, match=r"does not belong to the model: 3 keys of the LogBERT vocabulary"):
             Detectors.load(tmp_path / "wrong")
 
         # the right one loads
@@ -237,9 +207,11 @@ def test_the_bundle_must_belong_together(tmp_path):
         patch.undo()
 
 
-def test_a_missing_file_says_which_one_and_what_to_run(tmp_path):
-    make_bundle(tmp_path / "b", None)
-    (tmp_path / "b" / "rules.json").unlink()
+@pytest.mark.parametrize("name", ["settings.json", "drain.pkl", "model.pt"])
+def test_a_missing_file_says_which_one_and_what_to_run(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(engine.TemplateExtractor, "load", staticmethod(lambda path: FakeDrain(template_texts())))
+    make_bundle(tmp_path / "b")
+    (tmp_path / "b" / name).unlink()
 
-    with pytest.raises(BundleError, match=r"rules\.json is missing.*export-nlp-bundle"):
+    with pytest.raises(BundleError, match=name.replace(".", r"\.") + r" is missing.*export-nlp-bundle"):
         Detectors.load(tmp_path / "b")

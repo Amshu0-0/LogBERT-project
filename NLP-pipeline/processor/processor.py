@@ -1,14 +1,18 @@
-# This program reads BGL system-log lines from Kafka, runs the NLP project's detectors on them, and saves the results into MongoDB.
+# This program reads BGL system-log lines from Kafka, runs the NLP project's LogBERT on them, and saves the results into MongoDB.
 # It replaces the CA3 processor, which stored network flows: the pipeline around it (Kafka, MongoDB, TLS, policies, monitoring) is the same.
 #
-# What it does with the messages is in engine.py (the detectors and the windows) and sink.py (the writing). This file is the part that
+# What it does with the messages is in engine.py (Drain, LogBERT and the windows) and sink.py (the writing). This file is the part that
 # lives in a Kubernetes pod, and it is the CA3 processor with these changes:
 #   - a message is a log line, not a flow. Every line becomes one document ("events"); every 5-minute window becomes one document
-#     ("windows"), with the verdict of each detector; every replay becomes one document ("runs").
+#     ("windows"), with LogBERT's verdict; every replay becomes one document ("runs").
 #   - the Kafka offsets are committed by hand, AFTER the documents are written, and not past the oldest line that an open window still
 #     needs. If the pod dies, Kafka hands those lines out again, and the same documents are written again (they have fixed ids).
 #   - the topic must have ONE partition: a window is made of lines that follow each other in time, and a partition keeps its order.
 #     (The CA3 processor read 3 partitions with several replicas; this one is a single replica on purpose, see processor.yaml.)
+#   - the start-up WAITS instead of stopping. Kafka, the topic and MongoDB may not be ready when the pod starts (a cold cluster needs
+#     minutes), so the pod waits for each of them, and its log says which one. A topic that does not exist yet is made by the processor
+#     itself, with ONE partition. (Version 1.0.0 stopped at the first try: a topic that Kafka had not made yet sent the pod into
+#     CrashLoopBackOff every time, and the stack came up only after a command by hand.)
 #
 # What is kept from CA3:
 #   1. The MongoDB credentials come from files that Kubernetes mounts from a Secret (MONGO_USER_FILE, MONGO_PASSWORD_FILE).
@@ -37,6 +41,12 @@ STALL_SECONDS = 120
 
 # Lines per batch. A batch is written to MongoDB with three bulk calls and then committed.
 MAX_RECORDS = 500
+
+# How long the start-up waits for MongoDB, Kafka and the topic before it gives up and stops (Kubernetes then starts the pod again).
+# START_WAIT_SECONDS in the environment changes it. A cold cluster needs a few minutes: Kafka and MongoDB start at the same time as this
+# pod. While it waits, the pod is Running but not ready, its log says what it waits for, and /healthz still says ok (the loop has not
+# started, so nothing can be stuck).
+START_WAIT_SECONDS = 1200
 
 
 # One log line = one JSON object on standard output.
@@ -98,11 +108,14 @@ class Settings:
         self.runs = require("MONGO_RUNS_COLLECTION")
         self.metrics_port = int(require("METRICS_PORT"))
 
-        # The folder with drain.pkl, model.pt, rules.json, llm_rule_based_decisions.csv and settings.json (inside the image).
+        # The folder with drain.pkl, model.pt and settings.json (inside the image).
         self.bundle = require("BUNDLE_DIR")
 
         # How many CPU threads PyTorch may use. The nodes have 2 vCPUs and share them with Kafka and MongoDB.
         self.torch_threads = int(os.environ.get("TORCH_THREADS", "2"))
+
+        # How long the start-up waits for MongoDB, Kafka and the topic, in seconds.
+        self.start_wait_seconds = float(os.environ.get("START_WAIT_SECONDS", str(START_WAIT_SECONDS)))
 
         self.mongo_user = require_secret("MONGO_USER")
         self.mongo_password = require_secret("MONGO_PASSWORD")
@@ -114,7 +127,7 @@ MESSAGES = Counter("processor_messages_total", "Log lines read from Kafka and st
 ALERTS = Counter("processor_alerts_total", "Stored log lines that carry a BGL alert tag (the ground truth of the dataset).")
 BATCHES = Counter("processor_insert_batches_total", "Batches written to MongoDB (events, windows and runs).")
 WINDOWS = Counter("processor_windows_total", "Windows scored and stored.")
-FLAGGED = Counter("processor_windows_flagged_total", "Windows that a detector flagged as anomalous.", ["detector"])
+FLAGGED = Counter("processor_windows_flagged_total", "Windows that LogBERT flagged as anomalous.", ["detector"])
 UNSEEN = Counter("processor_unseen_lines_total", "Lines that match no template of the trained Drain parser.")
 LATE = Counter("processor_late_lines_total", "Lines that came too late for any open window (not windowed).")
 REORDERED = Counter("processor_reordered_lines_total", "Lines that arrived after a newer line (still windowed).")
@@ -263,8 +276,7 @@ def serve(consumer, engine, sink, topic, stop, max_records=MAX_RECORDS):
         REDELIVERED.inc(counts["redelivered"])
         BAD.inc(counts["bad"])
 
-        for detector in ("keyword", "llm", "logbert"):
-            FLAGGED.labels(detector).inc(counts["flagged_" + detector])
+        FLAGGED.labels("logbert").inc(counts["flagged_logbert"])
 
         for seconds in out.seconds:
             WINDOW_SECONDS.observe(seconds)
@@ -285,8 +297,7 @@ def serve(consumer, engine, sink, topic, stop, max_records=MAX_RECORDS):
         for event in out.events:
             if event["alert"] and not event.get("smoke") and alerts_total < 10:
                 alerts_total += 1
-                log("warning", "alert line stored", run=event["run"], offset=event["offset"], truth=event["truth"], template_id=event["template_id"],
-                    keyword=event["keyword"], llm=event["llm"])
+                log("warning", "alert line stored", run=event["run"], offset=event["offset"], truth=event["truth"], template_id=event["template_id"])
 
         count += counts["lines"] + counts["smoke"]
         windows_total += counts["windows"]
@@ -299,58 +310,88 @@ def serve(consumer, engine, sink, topic, stop, max_records=MAX_RECORDS):
     return count
 
 
-def main():
-    settings = Settings()
-    start_health_server(settings.metrics_port)
+# "Not there yet", in the answer of Kafka: the topic has no partition in it.
+class NotThereYet(Exception):
+    pass
 
-    running = True
 
-    # Kubernetes sends SIGTERM to stop a pod: finish the batch and leave the loop.
-    def stop_signal(signum, frame):
-        nonlocal running
-        running = False
+# Runs action() until it works, and returns what it returned. A failure of a kind in retry_on means "not ready yet": it is logged (the first
+# time, then every fifth time, so there is no line every 2 seconds) and action() is tried again after a pause of 2 seconds, then 4, 8 and at
+# most 15. A failure of a kind in give_up_on is a mistake in the settings: it ends the program at once, because waiting cannot mend it.
+# After `deadline` seconds the program ends too, and Kubernetes starts it again. stop() is true after SIGTERM: the program leaves quietly.
+def wait_until(what, action, retry_on, deadline, give_up_on=(), stop=lambda: False):
+    started = time.monotonic()
+    pause = 2.0
+    tries = 0
 
-    signal.signal(signal.SIGTERM, stop_signal)
-    signal.signal(signal.SIGINT, stop_signal)
+    while True:
+        tries += 1
 
-    # Imported here on purpose, so a missing setting is always the first thing reported (and the tests can import this file quickly).
-    import torch
-    from kafka import KafkaConsumer
-    from pymongo import MongoClient
+        try:
+            result = action()
+        except retry_on as error:
+            waited = time.monotonic() - started
+            facts = {"tries": tries, "waited_seconds": round(waited), "error": error.__class__.__name__, "detail": str(error)[:300]}
 
-    from engine import BundleError, Detectors, Engine
-    from sink import MongoSink
+            if isinstance(error, give_up_on):
+                log("error", f"cannot go on without {what}: this is a mistake in the settings, and waiting does not mend it", **facts)
+                sys.exit(1)
 
-    torch.set_num_threads(settings.torch_threads)
+            if waited >= deadline:
+                log("error", f"gave up waiting for {what}: the pod stops and Kubernetes starts it again", **facts)
+                sys.exit(1)
+
+            if stop():
+                log("info", f"stopped while waiting for {what}")
+                sys.exit(0)
+
+            if tries == 1 or tries % 5 == 0:
+                log("warning", f"waiting for {what}", **facts)
+
+            time.sleep(pause)
+            pause = min(pause * 2, 15.0)
+            continue
+
+        if tries > 1:
+            log("info", f"{what} is ready", tries=tries, waited_seconds=round(time.monotonic() - started))
+
+        return result
+
+
+# Makes sure that the topic exists, and says whether THIS call made it. Kafka makes a topic when the first message is sent, and the
+# processor starts before any producer: version 1.0.0 took the missing topic for an error and the pod stopped, again and again, until
+# someone made the topic by hand. "Create it" is safe to repeat: a topic that exists already is left as it is (its number of partitions
+# is checked afterwards, in main()). The processor connects with its own certificate; the stack has no Kafka ACLs (README, known
+# limitations), so it may create a topic.
+def ensure_topic(settings):
+    from kafka.admin import KafkaAdminClient
+    from kafka.errors import TopicAlreadyExistsError
+
+    admin = KafkaAdminClient(
+        bootstrap_servers=settings.broker,
+        security_protocol="SSL",
+        ssl_cafile=settings.ssl_ca,
+        ssl_certfile=settings.ssl_cert,
+        ssl_keyfile=settings.ssl_key,
+        ssl_check_hostname=True,
+        client_id="processor-start",
+    )
 
     try:
-        started = time.time()
-        detectors = Detectors.load(settings.bundle)
-    except BundleError as error:
-        log("error", "the models cannot be used", detail=str(error)[:500])
-        sys.exit(1)
+        admin.create_topics({settings.topic: {"num_partitions": 1, "replication_factor": 1}}, timeout_ms=15000)
+    except TopicAlreadyExistsError:
+        return False
+    finally:
+        admin.close()
 
-    log("info", "models loaded", seconds=round(time.time() - started, 1), logbert_keys=len(detectors.logbert.vocab) - 4, templates=len(detectors.extractor.templates),
-        rules=len(detectors.keyword.rules), llm_decisions=len(detectors.llm), window_seconds=detectors.size_seconds, step_seconds=detectors.step_seconds,
-        g=detectors.g, r=detectors.r, torch_threads=settings.torch_threads)
+    return True
 
-    # MongoDB over TLS with the user and password. pymongo checks the server certificate against the CA file and the host name.
-    client = MongoClient(settings.mongo_host, settings.mongo_port, username=settings.mongo_user, password=settings.mongo_password, tls=True,
-                         tlsCAFile=settings.mongo_tls_ca)
-    database = client[settings.database]
 
-    # Ask MongoDB to answer once, so wrong credentials or a missing database stop the program now (Kubernetes restarts it).
-    client.admin.command("ping")
+# Kafka over TLS with a client certificate. Offsets are committed by hand (see serve).
+def connect_consumer(settings):
+    from kafka import KafkaConsumer
 
-    # The indexes the REST API's questions need. Creating an index that exists already does nothing.
-    database[settings.events].create_index([("run", 1), ("offset", 1)])
-    database[settings.events].create_index("trace_id", sparse=True)
-    database[settings.windows].create_index([("run", 1), ("start", 1)])
-
-    sink = MongoSink(database, settings.events, settings.windows, settings.runs)
-
-    # Kafka over TLS with a client certificate. Offsets are committed by hand (see serve).
-    consumer = KafkaConsumer(
+    return KafkaConsumer(
         settings.topic,
         bootstrap_servers=settings.broker,
         security_protocol="SSL",
@@ -371,9 +412,88 @@ def main():
         max_poll_interval_ms=900000,
     )
 
-    partitions = consumer.partitions_for_topic(settings.topic)
 
-    if partitions is not None and len(partitions) != 1:
+# The partitions of the topic, once Kafka lists any. (The Kafka library answers with an EMPTY set for a topic that is not there yet.)
+def topic_partitions(consumer, topic):
+    partitions = consumer.partitions_for_topic(topic)
+
+    if not partitions:
+        raise NotThereYet(f"Kafka lists no partition of the topic {topic} yet")
+
+    return partitions
+
+
+def main():
+    settings = Settings()
+    start_health_server(settings.metrics_port)
+
+    running = True
+
+    # Kubernetes sends SIGTERM to stop a pod: finish the batch and leave the loop.
+    def stop_signal(signum, frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGTERM, stop_signal)
+    signal.signal(signal.SIGINT, stop_signal)
+
+    def stop():
+        return not running
+
+    # Imported here on purpose, so a missing setting is always the first thing reported (and the tests can import this file quickly).
+    import torch
+    from kafka.errors import KafkaConfigurationError, KafkaError
+    from pymongo import MongoClient
+    from pymongo.errors import PyMongoError
+
+    from engine import BundleError, Detectors, Engine
+    from sink import MongoSink
+
+    torch.set_num_threads(settings.torch_threads)
+
+    try:
+        started = time.time()
+        detectors = Detectors.load(settings.bundle)
+    except BundleError as error:
+        log("error", "the models cannot be used", detail=str(error)[:500])
+        sys.exit(1)
+
+    log("info", "models loaded", seconds=round(time.time() - started, 1), logbert_keys=len(detectors.logbert.vocab) - 4, templates=len(detectors.extractor.templates),
+        window_seconds=detectors.size_seconds, step_seconds=detectors.step_seconds, g=detectors.g, r=detectors.r, torch_threads=settings.torch_threads)
+
+    # MongoDB over TLS with the user and password. pymongo checks the server certificate against the CA file and the host name.
+    client = MongoClient(settings.mongo_host, settings.mongo_port, username=settings.mongo_user, password=settings.mongo_password, tls=True,
+                         tlsCAFile=settings.mongo_tls_ca)
+    database = client[settings.database]
+
+    # Ask MongoDB to answer once, and make the indexes that the REST API's questions need (creating an index that exists already does
+    # nothing). MongoDB may still be starting, and the user may not exist yet: the processor waits for it. Credentials that stay wrong
+    # end the wait after START_WAIT_SECONDS, and the log shows the error each time.
+    def prepare_mongodb():
+        client.admin.command("ping")
+        database[settings.events].create_index([("run", 1), ("offset", 1)])
+        database[settings.events].create_index("trace_id", sparse=True)
+        database[settings.windows].create_index([("run", 1), ("start", 1)])
+
+    wait_until("MongoDB", prepare_mongodb, PyMongoError, settings.start_wait_seconds, stop=stop)
+
+    sink = MongoSink(database, settings.events, settings.windows, settings.runs)
+
+    # The topic first. Kafka makes a topic only when the first message is sent, and this pod starts before any producer; and Kafka itself
+    # may not be ready yet. So: wait for Kafka, and make the topic (with ONE partition) if it is not there.
+    kafka_errors = (KafkaError, OSError)
+    made = wait_until("Kafka, to make sure that the topic exists", lambda: ensure_topic(settings), kafka_errors, settings.start_wait_seconds,
+                      KafkaConfigurationError, stop)
+
+    if made:
+        log("info", "the topic did not exist yet: the processor made it, with one partition", topic=settings.topic)
+
+    consumer = wait_until("Kafka", lambda: connect_consumer(settings), kafka_errors, settings.start_wait_seconds, KafkaConfigurationError, stop)
+    partitions = wait_until("the partitions of the topic", lambda: topic_partitions(consumer, settings.topic), (NotThereYet, *kafka_errors),
+                            settings.start_wait_seconds, KafkaConfigurationError, stop)
+
+    # A topic that exists with more than one partition stops the processor for good: the windows need the lines in order.
+    if len(partitions) != 1:
         log("error", "the topic must have exactly one partition", topic=settings.topic, partitions=len(partitions))
         sys.exit(1)
 

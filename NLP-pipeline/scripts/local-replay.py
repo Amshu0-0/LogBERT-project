@@ -4,8 +4,7 @@
 #   make local-replay LOCAL_ARGS="--limit 5000"            only the first 5000 lines (a quick try)
 #   python3 NLP-pipeline/scripts/local-replay.py --save NLP-pipeline/evidence/local-replay.json
 #
-# It is the same program as in the cluster (processor/engine.py): the same Drain parser, keyword rules, saved LLM decisions, windows and
-# LogBERT, fed with the lines of bundle/bgl-replay.log in batches, like Kafka would hand them to the processor. Only the two ends differ:
+# It is the same program as in the cluster (processor/engine.py): the same Drain parser, windows and LogBERT, fed with the lines of bundle/bgl-replay.log in batches, like Kafka would hand them to the processor. Only the two ends differ:
 # the lines come from the file, and the documents go into dictionaries instead of MongoDB. So the numbers printed here are the ones that
 # "make results" must print for the cluster (make results --compare evidence/local-replay.json checks that).
 #
@@ -40,7 +39,7 @@ def main(argv=None):
     from engine import BundleError, Detectors, Engine, Record
     from sink import MemorySink
     from summary import summarize
-    from tables import describe, differences, reference
+    from tables import describe, reference
 
     bundle = Path(args.bundle)
     replay = Path(args.file) if args.file else bundle / "bgl-replay.log"
@@ -57,8 +56,7 @@ def main(argv=None):
         print(f"Not done: {error}", file=sys.stderr)
         return 1
 
-    print(f"The models are loaded ({time.time() - started:.1f} s): {len(detectors.extractor.templates)} templates, LogBERT with {len(detectors.logbert.vocab) - 4} keys, "
-          f"{len(detectors.keyword.rules)} keyword rules, {len(detectors.llm)} saved LLM decisions")
+    print(f"The models are loaded ({time.time() - started:.1f} s): {len(detectors.extractor.templates)} templates, LogBERT with {len(detectors.logbert.vocab) - 4} keys")
 
     lines = [line.rstrip("\r\n") for line in replay.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
 
@@ -97,7 +95,6 @@ def main(argv=None):
             "stored": len(events),
             "with_alert_tag": sum(e["alert"] for e in events),
             "template_not_known": sum(1 for e in events if e["template_id"] == -1),
-            "llm_has_no_saved_decision": sum(1 for e in events if e["llm"] is None),
         },
         **summarize(windows),
     }
@@ -107,7 +104,7 @@ def main(argv=None):
     for text in describe(summary):
         print(text)
 
-    for text in reference(PIPELINE / "reference" / "comparison.csv"):
+    for text in reference(REPO / "NLP" / "results" / "comparison.csv"):
         print(("\n" if text.startswith("For comparison") else "") + text)
 
     problems = []

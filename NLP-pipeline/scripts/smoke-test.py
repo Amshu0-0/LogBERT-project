@@ -9,8 +9,8 @@
 #   3. It looks for the processor's log line with the same trace id, partition and offset.
 #   4. It asks MongoDB for the stored line (mongosh inside the MongoDB pod, over TLS, as the administrator).
 #   5. It calls the REST API from this computer, over HTTPS with the login, through the node port of the server: GET /events/<trace id>.
-# The line is classified like every other line (Drain template, keyword rules, saved LLM decision), so a pass also proves that the models
-# inside the processor image load and work. The line is NOT put into a window and does not belong to any replay (its run is "smoke").
+# The line is classified like every other line (its Drain template), so a pass also proves that the models inside the processor image load
+# and work. The line is NOT put into a window and does not belong to any replay (its run is "smoke").
 # The producer and the processor reach Kafka over TLS with their client certificates, and the processor reaches MongoDB over TLS with its own
 # account, so a pass also proves that all of that works. The only change to the stack is one more line in MongoDB. The trace id is new on every run.
 
@@ -37,11 +37,9 @@ def caught_up(group):
     return rows if rows and all(r[3] == 0 for r in rows) else None
 
 
-# What the detectors said about the line, in words, from a stored document or from the processor's log record.
+# What Drain said about the line, in words, from a stored document or from the processor's log record.
 def verdicts(item):
-    llm = item.get("llm")
-    return ("template " + str(item.get("template_id")) + ", keyword rules " + str(item.get("keyword")) + ", saved LLM decision "
-            + ("none for this template" if llm is None else str(llm)))
+    return "template " + str(item.get("template_id"))
 
 
 parser = argparse.ArgumentParser(description="Send one tagged log line through the pipeline and find it at every stage.")
@@ -127,11 +125,11 @@ try:
     say("1 line with this trace id: " + json.dumps(lib.trimmed(stored)))
     say("the collection holds " + str(record["total"]) + " lines in total")
 
-    if not stored.get("smoke") or "template_id" not in stored or "keyword" not in stored or "llm" not in stored:
-        raise lib.Fail("the stored line has no detector verdicts (template_id, keyword, llm): " + json.dumps(lib.trimmed(stored)))
+    if not stored.get("smoke") or "template_id" not in stored:
+        raise lib.Fail("the stored line has no template (template_id): " + json.dumps(lib.trimmed(stored)))
 
-    if (stored["template_id"], stored["keyword"], stored["llm"]) != (logged.get("template_id"), logged.get("keyword"), logged.get("llm")):
-        raise lib.Fail("MongoDB holds other verdicts than the processor logged: " + verdicts(stored) + "  /  " + verdicts(logged))
+    if stored["template_id"] != logged.get("template_id"):
+        raise lib.Fail("MongoDB holds another template than the processor logged: " + verdicts(stored) + "  /  " + verdicts(logged))
 
     # ------------------------------------------------------------ 6. can the REST API return it?
     print("\n[6/6] The REST API returns it to this computer")
@@ -158,8 +156,8 @@ try:
     if status != 200 or not answer.get("found") or answer.get("event", {}).get("trace_id") != trace:
         raise lib.Fail("the REST API did not return our line (HTTP " + str(status) + "), although MongoDB holds it (stage 5 above). Run:  make diagnose   and look at the restapi pods")
 
-    if answer["event"].get("template_id") != stored["template_id"] or answer["event"].get("keyword") != stored["keyword"]:
-        raise lib.Fail("the REST API returned other verdicts than MongoDB holds")
+    if answer["event"].get("template_id") != stored["template_id"]:
+        raise lib.Fail("the REST API returned another template than MongoDB holds")
 
     if args.save:
         with open(args.save, "w") as f:

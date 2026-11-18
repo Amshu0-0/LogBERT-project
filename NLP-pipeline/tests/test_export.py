@@ -1,7 +1,7 @@
 # scripts/export-nlp-bundle.py on a small made-up BGL log that is run through the NLP project's own preprocessing (Drain, split, windows).
-# The trained files (model.pt, and the rules and decisions of reference/) are the real ones; they belong to the real Drain parser, not to the
-# made-up log, so the last check of the script (the processor's loader) is shown to REFUSE the made-up parser, and then to ACCEPT the bundle
-# when the parser is replaced by the stand-in of the other tests. What this cannot show: that YOUR drain.pkl and YOUR messages.parquet are the ones that
+# The trained model (model.pt) is the real one; it belongs to the real Drain parser, not to the made-up log, so the last check of the script
+# (the processor's loader) is shown to REFUSE the made-up parser, and then to ACCEPT the bundle when the parser is replaced by the stand-in of
+# the other tests. What this cannot show: that YOUR drain.pkl and YOUR messages.parquet are the ones that
 # belong to your model.pt. The script checks that on your computer.
 
 import importlib.util
@@ -102,7 +102,7 @@ def test_the_loader_refuses_a_parser_that_does_not_belong_to_the_model(nlp_root,
     seen = capsys.readouterr()
 
     assert code == 1
-    assert "does not belong to the model" in seen.err and "templates of llm_rule_based_decisions.csv" in seen.err
+    assert "does not belong to the model" in seen.err and "keys of the LogBERT vocabulary" in seen.err
 
 
 def run_export(nlp_root, out, *extra):
@@ -116,12 +116,14 @@ def test_the_bundle_holds_the_settings_of_the_experiment(nlp_root, tmp_path, sta
     files = run_export(nlp_root, tmp_path / "bundle")
     settings = json.loads(files["settings.json"])
 
-    assert settings["keyword_top_k"] == 30
+    assert set(settings) == {"logbert", "window", "from"}
     assert settings["logbert"] == {"g": 8, "r": 8, "mask_ratio": 0.5, "full_coverage": True, "seed": 1234}
     assert settings["window"] == {"size_seconds": 300, "step_seconds": 60}
 
-    for name in ("drain.pkl", "model.pt", "rules.json", "llm_rule_based_decisions.csv", "settings.json", "bgl-replay.log", "replay-info.json"):
+    for name in ("drain.pkl", "model.pt", "settings.json", "bgl-replay.log", "replay-info.json"):
         assert (tmp_path / "bundle" / name).is_file()
+
+    assert sorted(p.name for p in (tmp_path / "bundle").iterdir()) == ["bgl-replay.log", "drain.pkl", "model.pt", "replay-info.json", "settings.json"]
 
 
 def test_the_replay_file_is_a_slice_of_the_test_period_in_time_order(nlp_root, tmp_path, standin_parser):
@@ -247,7 +249,7 @@ def test_a_configuration_that_inherits_is_read_like_the_nlp_project_reads_it(nlp
     settings = json.loads((tmp_path / "bundle" / "settings.json").read_text(encoding="utf-8"))
 
     assert settings["from"]["experiment"] == "bgl_cpu"
-    assert settings["window"] == {"size_seconds": 300, "step_seconds": 60} and settings["keyword_top_k"] == 30 and settings["logbert"]["seed"] == 1234
+    assert settings["window"] == {"size_seconds": 300, "step_seconds": 60} and settings["logbert"]["seed"] == 1234
     assert "experiment name: bgl_cpu" in shown
     assert str((copy / "outputs" / "bgl_cpu" / "logbert" / "model.pt").resolve()) in shown
 
@@ -308,8 +310,8 @@ def test_the_files_that_are_used_are_listed(nlp_root, tmp_path, standin_parser, 
     run_export(nlp_root, tmp_path / "bundle")
     shown = capsys.readouterr().out
 
-    for name, path in (("model:", "results/logbert/model.pt"), ("rules:", "reference/rules.json"), ("decisions:", "reference/llm_rule_based_decisions.csv")):
-        assert re.search(r"^  %s\s+\S*%s$" % (name, re.escape(path)), shown, re.M), name
+    assert re.search(r"^  model:\s+\S*results/logbert/model\.pt$", shown, re.M)
+    assert "rules" not in shown and "decisions" not in shown
 
 
 def test_a_python_without_the_nlp_code_is_told_what_to_do(nlp_root, tmp_path, capsys, monkeypatch):
@@ -408,7 +410,7 @@ def test_a_parser_that_does_not_fit_points_to_the_folder_next_to_it_that_does(nl
     texts = template_texts()
     patch = pytest.MonkeyPatch()
     patch.setattr(engine.TemplateExtractor, "load", staticmethod(
-        lambda path: FakeDrain(texts) if open(path, "rb").read().startswith(b"the parser of the run") else FakeDrain({1: "text that is in no saved decision"})))
+        lambda path: FakeDrain(texts) if open(path, "rb").read().startswith(b"the parser of the run") else FakeDrain({1: "text of a template that the model does not know"})))
 
     try:
         out = tmp_path / "bundle"

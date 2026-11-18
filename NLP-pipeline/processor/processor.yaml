@@ -1,7 +1,6 @@
 # Processor: the processing stage, and the place where the NLP project runs.
-# It reads BGL log lines from Kafka, runs the NLP project's detectors on them (Drain templates, the keyword rules, the saved decisions
-# of the rule-guided LLM, and LogBERT on 5-minute windows) and stores the lines, the windows with each detector's verdict, and the
-# replays in MongoDB. The models are inside the image (/bundle, made by scripts/export-nlp-bundle.py).
+# It reads BGL log lines from Kafka, runs the NLP project's detector on them (Drain templates, and LogBERT on 5-minute windows) and
+# stores the lines, the windows with LogBERT's verdict, and the replays in MongoDB. The models are inside the image (/bundle, made by scripts/export-nlp-bundle.py).
 # It talks to Kafka over TLS with its own client certificate (Secret kafka-client-processor) and to MongoDB over TLS with its own
 # account, which may read and write the database nlp and nothing else (Secret mongo-processor). It never sees the administrator's login.
 #
@@ -52,7 +51,7 @@ metadata:
     app.kubernetes.io/component: consumer
     app.kubernetes.io/part-of: nlp-pipeline
   annotations:
-    description: "Reads BGL log lines from Kafka (TLS, client certificate), runs the NLP detectors (Drain, keyword rules, saved LLM decisions, LogBERT on 5-minute windows) and stores lines, windows and runs in MongoDB (TLS, own account). One replica, because the windows need the lines in order"
+    description: "Reads BGL log lines from Kafka (TLS, client certificate), runs Drain and LogBERT (on 5-minute windows) and stores lines, windows and runs in MongoDB (TLS, own account). One replica, because the windows need the lines in order"
 
 spec:
   # One replica on purpose: the topic has one partition and the windows need the lines in order.
@@ -108,7 +107,7 @@ spec:
 
       containers:
         - name: processor
-          image: ghcr.io/amshu0-0/nlp-processor:1.0.0
+          image: ghcr.io/amshu0-0/nlp-processor:1.0.1
           imagePullPolicy: IfNotPresent
 
           # Load the shared pipeline settings and the processor-only settings.

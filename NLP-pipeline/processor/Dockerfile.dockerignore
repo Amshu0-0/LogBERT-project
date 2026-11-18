@@ -6,11 +6,8 @@
 !NLP-pipeline/processor/requirements.txt
 !NLP-pipeline/processor/processor.py
 !NLP-pipeline/processor/engine.py
-!NLP-pipeline/processor/baselines.py
 !NLP-pipeline/processor/sink.py
 !NLP-pipeline/bundle/drain.pkl
 !NLP-pipeline/bundle/model.pt
-!NLP-pipeline/bundle/rules.json
-!NLP-pipeline/bundle/llm_rule_based_decisions.csv
 !NLP-pipeline/bundle/settings.json
 **/__pycache__

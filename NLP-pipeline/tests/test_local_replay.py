@@ -1,7 +1,8 @@
-# scripts/local-replay.py with the real LogBERT, rules and decisions of the NLP project (Drain replaced by the stand-in of test_real_model.py).
-# The numbers of the keyword rules and of the saved LLM decisions in the table are recalculated here in a different way (the NLP project's own
-# window function and a prefix sum) and must be the same. LogBERT is not recalculated: the NLP project's batch evaluation seeds its masks by the
-# position of a window in the whole batch, the pipeline seeds them per window, so a borderline window can come out differently (README says so).
+# scripts/local-replay.py with the real LogBERT of the NLP project (Drain replaced by the stand-in of test_real_model.py).
+# The numbers in the table are recalculated here in a different way: the NLP project's own window function cuts the log into windows, a
+# prefix sum counts the alert lines in them, and Detectors.score() judges each window by itself. The windows, the ground truth and the
+# four counts must be the same as in the table. (The NLP project's batch evaluation is not used for the verdicts: it seeds the masks by the
+# position of a window in the whole batch, the pipeline seeds them per window, so a borderline window can come out differently. README says so.)
 
 import importlib.util
 import json
@@ -29,7 +30,7 @@ def load(name):
 @pytest.fixture
 def bundle(tmp_path):
     texts = template_texts()
-    make_bundle(tmp_path, texts)
+    make_bundle(tmp_path)
     keys = sorted(texts)
     rng = np.random.default_rng(21)
     ts, lines = 1_118_000_000, []
@@ -48,13 +49,13 @@ def bundle(tmp_path):
     patch.undo()
 
 
-def expected_counts(lines, detectors, field):
+def expected_counts(lines, detectors):
     parsed = [parse_bgl_line(line) for line in lines]
-    verdicts = [detectors.classify(p.content) for p in parsed]
-    said = np.array([getattr(v, field) == 1 for v in verdicts], dtype=np.int64)
+    ids = np.array([detectors.classify(p.content).template_id for p in parsed], dtype=np.int64)
     truth = np.array([int(p.is_anomalous) for p in parsed], dtype=np.int64)
     pairs, _ = sliding_windows(np.array([p.timestamp for p in parsed]), 300, 60)
-    flagged, real = count_in_windows(said, pairs) > 0, count_in_windows(truth, pairs) > 0
+    flagged = np.array([detectors.score(ids[lo:hi]).flag == 1 for lo, hi in pairs])
+    real = count_in_windows(truth, pairs) > 0
 
     return {"tp": int((flagged & real).sum()), "fp": int((flagged & ~real).sum()), "tn": int((~flagged & ~real).sum()), "fn": int((~flagged & real).sum())}, len(pairs), int(real.sum())
 
@@ -69,20 +70,20 @@ def test_the_table_of_the_replay_is_the_one_the_nlp_functions_give(bundle, tmp_p
     summary = json.loads(saved.read_text(encoding="utf-8"))
     detectors = engine.Detectors.load(str(folder))
 
-    for field in ("keyword", "llm"):
-        counts, windows, anomalous = expected_counts(lines, detectors, field)
-        got = summary["detectors"][field]
+    counts, windows, anomalous = expected_counts(lines, detectors)
+    got = summary["detectors"]["logbert"]
 
-        assert {k: got[k] for k in ("tp", "fp", "tn", "fn")} == counts, field
-        assert summary["windows"] == windows and summary["anomalous_windows"] == anomalous
+    assert set(summary["detectors"]) == {"logbert"}
+    assert {k: got[k] for k in ("tp", "fp", "tn", "fn")} == counts
+    assert summary["windows"] == windows > 10 and summary["anomalous_windows"] == anomalous > 0
+    assert counts["tp"] + counts["fp"] > 0, "the test log must make LogBERT flag something, or the counts prove little"
 
-    assert summary["lines"]["stored"] == 1400 and summary["lines"]["with_alert_tag"] == 5
+    assert summary["lines"] == {"stored": 1400, "with_alert_tag": 5, "template_not_known": 0}
     assert summary["run"]["status"] == "complete"
-    assert summary["detectors"]["logbert"]["tp"] + summary["detectors"]["logbert"]["fn"] == summary["anomalous_windows"]
+    assert got["tp"] + got["fn"] == summary["anomalous_windows"]
 
-    for name in ("LogBERT, full coverage (A+)", "rule-guided LLM, saved decisions (B3)", "keyword rules (B4)"):
-        assert name in shown
-
+    assert "LogBERT, full coverage (A+)" in shown
+    assert "keyword" not in shown and "LLM" not in shown
     assert "Replay local" in shown and "status: complete" in shown
 
 
@@ -126,7 +127,7 @@ def test_the_two_summaries_are_compared_number_by_number(bundle, tmp_path):
 
     assert tables.differences(a, b) == []
 
-    b["detectors"]["keyword"]["fp"] += 2
+    b["detectors"]["logbert"]["fp"] += 2
     b["windows"] += 1
 
-    assert tables.differences(a, b, ("laptop", "cluster")) == ["windows: laptop %d, cluster %d" % (a["windows"], b["windows"]), "keyword rules (B4): fp laptop %d, cluster %d" % (a["detectors"]["keyword"]["fp"], b["detectors"]["keyword"]["fp"])]
+    assert tables.differences(a, b, ("laptop", "cluster")) == ["windows: laptop %d, cluster %d" % (a["windows"], b["windows"]), "LogBERT, full coverage (A+): fp laptop %d, cluster %d" % (a["detectors"]["logbert"]["fp"], b["detectors"]["logbert"]["fp"])]

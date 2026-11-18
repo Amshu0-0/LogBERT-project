@@ -1,0 +1,10 @@
+# What the demo website needs:  pip install -r demo/requirements.txt   (from the folder NLP-pipeline, in the environment of your NLP project)
+# Gradio is the only one that the NLP project's own environment may lack; the others are the packages of NLP/pyproject.toml.
+gradio>=6.32,<7
+torch>=2.1
+numpy>=1.24
+pandas>=2.0
+pyarrow>=14.0
+pyyaml>=6.0
+drain3>=0.9.11
+tqdm>=4.66

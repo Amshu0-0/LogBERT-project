@@ -2,8 +2,11 @@
 
 import json
 from collections import namedtuple
+from types import SimpleNamespace
 
 import pytest
+from kafka import KafkaProducer
+from kafka.errors import KafkaConfigurationError, KafkaTimeoutError
 from prometheus_client import REGISTRY
 
 import producer
@@ -140,3 +143,108 @@ def test_the_settings(monkeypatch):
 
     with pytest.raises(SystemExit, match="missing required setting: DATASET_FILE"):
         producer.Settings()
+
+
+# ---------------------------------------------------------------- waiting for Kafka (1.0.0 stopped at the first failed connection)
+
+# What build_producer reads from the settings.
+def kafka_settings(wait=180.0):
+    return SimpleNamespace(broker="kafka:9092", ssl_ca="/ca", ssl_cert="/c", ssl_key="/k", start_wait_seconds=wait)
+
+
+# A stand-in for the Kafka library's producer: the first `failures` tries say what the real one says when Kafka does not answer yet.
+@pytest.fixture
+def connecting(monkeypatch, capsys):
+    state = SimpleNamespace(tries=0, config=None, sleeps=[])
+
+    def install(failures=0, error=KafkaTimeoutError):
+        class Connecting:
+            def __init__(self, **config):
+                state.tries += 1
+
+                if state.tries <= failures:
+                    raise error("Unable to bootstrap from kafka:9092")
+
+                state.config = config
+
+        monkeypatch.setattr("kafka.KafkaProducer", Connecting)
+        monkeypatch.setattr(producer.time, "sleep", state.sleeps.append)
+        return state
+
+    state.install = install
+    state.logs = lambda: [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    return state
+
+
+def test_the_producer_waits_for_kafka_until_it_answers(connecting):
+    connecting.install(failures=2)
+
+    assert producer.build_producer(kafka_settings()) is not None
+    assert connecting.tries == 3 and connecting.sleeps == [2.0, 4.0]
+
+    first, second = connecting.logs()
+    assert (first["level"], first["msg"], first["tries"], first["error"]) == ("warning", "waiting for Kafka", 1, "KafkaTimeoutError")
+    assert (second["level"], second["msg"], second["tries"]) == ("info", "Kafka is ready", 3)
+
+
+def test_a_producer_that_finds_kafka_at_once_says_nothing_and_waits_for_nothing(connecting):
+    connecting.install()
+
+    producer.build_producer(kafka_settings())
+    assert connecting.tries == 1 and connecting.sleeps == [] and connecting.logs() == []
+
+
+def test_the_producer_connects_over_tls_with_settings_that_the_library_knows(connecting):
+    connecting.install()
+
+    producer.build_producer(kafka_settings())
+    config = connecting.config
+    assert config["bootstrap_servers"] == "kafka:9092" and config["security_protocol"] == "SSL" and config["ssl_check_hostname"] is True
+    assert (config["ssl_cafile"], config["ssl_certfile"], config["ssl_keyfile"]) == ("/ca", "/c", "/k")
+    assert config["acks"] == "all" and config["max_in_flight_requests_per_connection"] == 1
+    assert set(config) <= set(KafkaProducer.DEFAULT_CONFIG)
+
+
+def test_the_producer_gives_up_after_the_waiting_time_and_says_so(connecting):
+    connecting.install(failures=1000)
+
+    with pytest.raises(SystemExit) as stop:
+        producer.build_producer(kafka_settings(wait=0))
+
+    assert stop.value.code == 1 and connecting.sleeps == []
+    (line,) = connecting.logs()
+    assert line["level"] == "error" and line["msg"] == "gave up waiting for Kafka" and "kafka:9092" in line["detail"]
+
+
+def test_a_wrong_setting_is_not_waited_for(connecting):
+    connecting.install(failures=1000, error=KafkaConfigurationError)
+
+    with pytest.raises(SystemExit) as stop:
+        producer.build_producer(kafka_settings())
+
+    assert stop.value.code == 1 and connecting.sleeps == []
+    (line,) = connecting.logs()
+    assert line["msg"].startswith("cannot go on without Kafka") and line["error"] == "KafkaConfigurationError"
+
+
+def test_a_stop_signal_while_waiting_ends_the_waiting_quietly(connecting):
+    connecting.install(failures=1000)
+
+    with pytest.raises(SystemExit) as stop:
+        producer.build_producer(kafka_settings(), stop=lambda: True)
+
+    assert stop.value.code == 0 and connecting.sleeps == []
+
+
+def test_the_waiting_time_is_three_minutes_unless_it_is_set(monkeypatch):
+    values = {"KAFKA_BROKER": "kafka:9092", "KAFKA_TOPIC": "system-logs", "DATASET_FILE": "bgl-replay.log", "KAFKA_SSL_CA_FILE": "/ca",
+              "KAFKA_SSL_CERT_FILE": "/c", "KAFKA_SSL_KEY_FILE": "/k", "PRODUCER_METRICS_PORT": "8001"}
+
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    monkeypatch.delenv("START_WAIT_SECONDS", raising=False)
+    assert producer.Settings().start_wait_seconds == 180
+
+    monkeypatch.setenv("START_WAIT_SECONDS", "45")
+    assert producer.Settings().start_wait_seconds == 45

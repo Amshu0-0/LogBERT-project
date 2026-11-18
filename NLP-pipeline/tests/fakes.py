@@ -24,8 +24,8 @@ def random_times(rng, n):
     return times
 
 
-# Detectors that need no files: the template is the number after "t" in the text, "keyword" says yes for multiples of 7, the saved LLM
-# decision says yes for multiples of 11 and "nothing saved" for multiples of 13, LogBERT flags a window that holds a multiple of 5.
+# A detector that needs no files: the template is the number after "t" in the text, and "LogBERT" flags a window that holds more than two
+# multiples of 5 (it counts them as the missed keys).
 class FakeDetectors:
     size_seconds = 300
     step_seconds = 60
@@ -35,9 +35,7 @@ class FakeDetectors:
 
     def classify(self, content):
         template_id = int(content.split()[0][1:])
-        keyword = int(template_id % 7 == 0)
-        llm = None if template_id % 13 == 0 else int(template_id % 11 == 0)
-        return Line(template_id, f"template {template_id}", keyword, 1 if keyword else None, "fake", llm)
+        return Line(template_id, f"template {template_id}")
 
     def score(self, template_ids):
         self.scored += 1

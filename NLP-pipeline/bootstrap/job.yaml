@@ -56,7 +56,7 @@ spec:
 
       containers:
         - name: bootstrap
-          image: ghcr.io/amshu0-0/nlp-producer:1.0.0
+          image: ghcr.io/amshu0-0/nlp-producer:1.0.1
           imagePullPolicy: IfNotPresent
 
           # The producer image also carries bootstrap.py (the processor image is large because of PyTorch, so this small one is used). Only the command differs.

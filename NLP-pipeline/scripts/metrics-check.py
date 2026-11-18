@@ -46,8 +46,6 @@ NUMBERS = (
     ("log lines stored by the processor since it started", "sum(processor_messages_total)", "processor_messages_total", False),
     ("windows scored by the processor since it started", "sum(processor_windows_total)", "processor_windows_total", False),
     ("windows flagged by LogBERT since it started", 'sum(processor_windows_flagged_total{detector="logbert"})', 'processor_windows_flagged_total{detector="logbert"}', True),
-    ("windows flagged by the rule-guided LLM since it started", 'sum(processor_windows_flagged_total{detector="llm"})', 'processor_windows_flagged_total{detector="llm"}', True),
-    ("windows flagged by the keyword rules since it started", 'sum(processor_windows_flagged_total{detector="keyword"})', 'processor_windows_flagged_total{detector="keyword"}', True),
     ("LogBERT seconds per window, mean", "sum(processor_window_score_seconds_sum) / sum(processor_window_score_seconds_count)", "processor_window_score_seconds_count", False),
     ("REST requests per second", "sum(rate(restapi_requests_total[1m]))", "restapi_requests_total", False),
     ("REST server errors per second (status 5xx)", 'sum(rate(restapi_requests_total{status=~"5.."}[1m]))', "restapi_requests_total", False),

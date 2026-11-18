@@ -6,14 +6,10 @@
 # What happens, in order:
 #   1. A Kafka message holds one raw BGL log line. parse_bgl_line (from your NLP project, the package logad) splits off the alert tag.
 #      The tag is the ground truth. It is stored for the evaluation only: no detector ever sees it, as in the NLP project.
-#   2. Drain (drain.pkl, fitted by the NLP project) maps the message text to a template ID: the same IDs that LogBERT and the rules know.
-#   3. Two detectors work on single templates: the keyword rules (condition B4) and the saved decisions of the rule-guided LLM (B3). They are
-#      the reference detectors of the first version of the NLP project; baselines.py holds the code that applies the rules (the NLP package
-#      logad is LogBERT only now).
-#   4. The line goes into a 5-minute window that slides by 1 minute: the same windows as in the NLP project's evaluation (class Windower).
-#   5. When a window is complete (a line from after its end has arrived), LogBERT (A, the full-coverage variant) scores it, and the two
-#      template detectors lift their labels to the window: a window is flagged if any of its messages is.
-#   6. The results are documents for MongoDB: one per log line ("events"), one per window ("windows"), one per replay ("runs").
+#   2. Drain (drain.pkl, fitted by the NLP project) maps the message text to a template ID: the same IDs that LogBERT knows.
+#   3. The line goes into a 5-minute window that slides by 1 minute: the same windows as in the NLP project's evaluation (class Windower).
+#   4. When a window is complete (a line from after its end has arrived), LogBERT (A+, the full-coverage variant) scores it.
+#   5. The results are documents for MongoDB: one per log line ("events"), one per window ("windows"), one per replay ("runs").
 #
 # Restarts: a window can be scored again after a crash and gives the same answer (the masks LogBERT uses are seeded per window), and the
 # documents have fixed ids, so writing them twice changes nothing. The processor commits a Kafka offset only up to the oldest line that an
@@ -23,7 +19,6 @@
 # It needs the NLP project's package (logad), torch, numpy, and the files that NLP-pipeline/scripts/export-nlp-bundle.py collects.
 
 import bisect
-import csv
 import json
 import os
 import time
@@ -37,8 +32,6 @@ from logad.logbert.dataset import window_to_chunks
 from logad.logbert.detector import LogBERTDetector
 from logad.logbert.trainer import load_checkpoint
 
-from baselines import KeywordClassifier, load_rules
-
 # How many masked copies of a window LogBERT looks at in one forward pass. The library's default is 128, which is too much for one very
 # busy window: a window of 40,000 lines needed about 2 GB (more than the processor may use), while 16 needs about 0.9 GB, gives the same
 # answer (the masks do not depend on the batch) and is even a little faster on 2 CPUs. Measured with the real model; see processor.yaml.
@@ -51,45 +44,27 @@ UNSEEN = -1
 # One message as it comes from Kafka.
 Record = namedtuple("Record", "topic partition offset timestamp_ms value")
 
-# What the detectors say about one line. keyword is 0 or 1; llm is 0, 1 or None (the saved experiment has no decision for this template).
-Line = namedtuple("Line", "template_id template keyword keyword_rule keyword_reason llm")
+# What Drain says about one line: the template ID (UNSEEN if no template matches) and the template's text.
+Line = namedtuple("Line", "template_id template")
 
 # What LogBERT says about one window: flag 0 or 1, the largest number of masked keys outside the top-g (over the window's chunks), and
 # how many chunks the window was cut into (a chunk holds at most max_len - 1 keys).
 Score = namedtuple("Score", "flag missed chunks")
 
-# One line inside a window: its Kafka offset, its time (seconds since 1970), its template, and the labels. alert is the ground truth.
-Item = namedtuple("Item", "offset ts template_id alert keyword llm")
+# One line inside a window: its Kafka offset, its time (seconds since 1970), its template, and the label. alert is the ground truth.
+Item = namedtuple("Item", "offset ts template_id alert")
 
 
 class BundleError(Exception):
     pass
 
 
-# ---------------------------------------------------------------- the detectors
+# ---------------------------------------------------------------- the detector
 
-# Reads the saved decisions of the rule-guided LLM: {template id: (label, template text)}.
-def read_llm_decisions(path):
-    decisions = {}
-
-    with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            decisions[int(row["template_id"])] = (int(row["label"]), row.get("template", ""))
-
-    return decisions
-
-
-# The text of a template with every run of white space turned into one space (a CSV file and a pickle may differ in that, not in meaning).
-def squash(text):
-    return " ".join(str(text).split())
-
-
-# Everything that was trained or saved by the NLP project, loaded once. classify() looks at one line, score() at one window.
+# Everything that was trained by the NLP project, loaded once. classify() looks at one line, score() at one window.
 class Detectors:
-    def __init__(self, extractor, keyword, llm, logbert, g, r, size_seconds=300, step_seconds=60, cache_size=50000):
+    def __init__(self, extractor, logbert, g, r, size_seconds=300, step_seconds=60, cache_size=50000):
         self.extractor = extractor
-        self.keyword = keyword
-        self.llm = llm
         self.logbert = logbert
         self.g = g
         self.r = r
@@ -98,7 +73,7 @@ class Detectors:
         self.cache_size = cache_size
         self.cache = {}
 
-    # Load the bundle folder: drain.pkl, model.pt, rules.json, llm_rule_based_decisions.csv and settings.json.
+    # Load the bundle folder: drain.pkl, model.pt and settings.json.
     @classmethod
     def load(cls, directory):
         def path(name):
@@ -113,30 +88,25 @@ class Detectors:
             settings = json.load(f)
 
         extractor = TemplateExtractor.load(path("drain.pkl"))
-        rules = load_rules(path("rules.json"))[: int(settings["keyword_top_k"])]
-        llm = read_llm_decisions(path("llm_rule_based_decisions.csv"))
         model, vocab, _centre, _checkpoint = load_checkpoint(path("model.pt"), "cpu")
         setting = settings["logbert"]
         logbert = LogBERTDetector(model, vocab, device="cpu", mask_ratio=float(setting["mask_ratio"]),
                                   full_coverage=bool(setting["full_coverage"]), batch_size=SCORE_BATCH, seed=int(setting["seed"]))
 
-        detectors = cls(extractor, KeywordClassifier(rules), llm, logbert, int(setting["g"]), int(setting["r"]),
+        detectors = cls(extractor, logbert, int(setting["g"]), int(setting["r"]),
                         int(settings["window"]["size_seconds"]), int(settings["window"]["step_seconds"]))
         detectors.check_bundle()
         return detectors
 
-    # The files must belong together. drain.pkl gives the template IDs; model.pt and the saved decisions were made with IDs from a drain.pkl.
-    # If you ran "make preprocess" again after training, the IDs may mean other templates, and every verdict would be wrong without any
-    # error. So: every template of the saved decisions must have the same text in drain.pkl, and every key LogBERT knows must exist in it.
+    # The files must belong together. drain.pkl gives the template IDs; model.pt was trained with IDs from a drain.pkl. If you ran
+    # "make preprocess" again after training, the IDs may mean other templates, and every verdict would be wrong without any error. The
+    # one thing that can be checked here: every key that LogBERT knows must exist in drain.pkl.
     def check_bundle(self):
         known = self.extractor.templates
-        wrong = [(i, text) for i, (_label, text) in self.llm.items() if squash(known.get(i, "")) != squash(text)]
         missing = [k for k in self.logbert.vocab.keys if k not in known]
 
-        if wrong or missing:
-            sample = ", ".join(f"template {i}" for i, _ in wrong[:5])
-            raise BundleError(f"drain.pkl does not belong to the model and the decisions: {len(wrong)} templates of llm_rule_based_decisions.csv "
-                              f"differ in drain.pkl ({sample}) and {len(missing)} keys of the LogBERT vocabulary are not in it. "
+        if missing:
+            raise BundleError(f"drain.pkl does not belong to the model: {len(missing)} keys of the LogBERT vocabulary are not in it. "
                               "Make the bundle again from ONE run of the NLP project:  python3 NLP-pipeline/scripts/export-nlp-bundle.py")
 
     # The verdicts of one log line (its text without the alert tag). Drain's match() does not change the model, so the answer for a text
@@ -146,10 +116,7 @@ class Detectors:
 
         if line is None:
             template_id, text = self.extractor.match(content)
-            template_id = UNSEEN if template_id is None else template_id
-            decision = self.keyword.classify(template_id, text)
-            saved = self.llm.get(template_id)
-            line = Line(template_id, text, int(decision.label), decision.rule, decision.reason, None if saved is None else saved[0])
+            line = Line(UNSEEN if template_id is None else template_id, text)
 
             if len(self.cache) >= self.cache_size:
                 self.cache.clear()
@@ -319,7 +286,7 @@ class Output:
         # (level, message, fields) lines for the processor's log
         self.logs = []
 
-        # numbers for the metrics: lines, alerts, unseen, bad, late, reordered, smoke, windows, flagged_keyword, flagged_llm, flagged_logbert
+        # numbers for the metrics: lines, alerts, unseen, bad, late, reordered, smoke, windows, flagged_logbert
         self.counts = Counter()
 
         # seconds that LogBERT needed for each window of this batch
@@ -428,7 +395,7 @@ class Engine:
         out.counts["alerts"] += int(parsed.is_anomalous)
         out.counts["unseen"] += int(line.template_id == UNSEEN)
 
-        status, windows = self.windower.add(Item(record.offset, parsed.timestamp, line.template_id, int(parsed.is_anomalous), line.keyword, line.llm))
+        status, windows = self.windower.add(Item(record.offset, parsed.timestamp, line.template_id, int(parsed.is_anomalous)))
 
         if status != "ok":
             out.counts[status] += 1
@@ -470,7 +437,7 @@ class Engine:
         out.events.append(event)
         out.counts["smoke"] += 1
         out.logs.append(("info", "stored", {"trace_id": trace, "topic": record.topic, "partition": record.partition, "offset": record.offset,
-                                            "template_id": line.template_id, "keyword": line.keyword, "llm": line.llm}))
+                                            "template_id": line.template_id}))
 
     # The document of one log line. "alert" and "truth" are the ground truth (the BGL alert tag), kept for the evaluation.
     def _event_document(self, run, record, value, parsed, line):
@@ -488,12 +455,9 @@ class Engine:
             "template": line.template[:300],
             "truth": parsed.alert_tag,
             "alert": int(parsed.is_anomalous),
-            "keyword": line.keyword,
-            "keyword_rule": line.keyword_rule,
-            "llm": line.llm,
         }
 
-    # The document of one window: what is in it, what the ground truth says, and what each detector says.
+    # The document of one window: what is in it, what the ground truth says, and what LogBERT says.
     def _window_document(self, run, window, out):
         items = window.items
         started = time.perf_counter()
@@ -501,13 +465,9 @@ class Engine:
         seconds = time.perf_counter() - started
 
         alerts = sum(i.alert for i in items)
-        keyword_hits = sum(i.keyword for i in items)
-        llm_hits = sum(1 for i in items if i.llm == 1)
 
         out.seconds.append(seconds)
         out.counts["windows"] += 1
-        out.counts["flagged_keyword"] += int(keyword_hits > 0)
-        out.counts["flagged_llm"] += int(llm_hits > 0)
         out.counts["flagged_logbert"] += score.flag
 
         return {
@@ -522,10 +482,6 @@ class Engine:
             "n_unseen": sum(1 for i in items if i.template_id == UNSEEN),
             "truth_alerts": alerts,
             "truth": int(alerts > 0),
-            "keyword_hits": keyword_hits,
-            "keyword": int(keyword_hits > 0),
-            "llm_hits": llm_hits,
-            "llm": int(llm_hits > 0),
             "logbert": score.flag,
             "logbert_missed": score.missed,
             "logbert_chunks": score.chunks,

@@ -1,6 +1,6 @@
 # LogBERT for System Log Anomaly Detection: a Reproduction on the BGL Supercomputer Log
 
-[![tests](https://github.com/Amshu0-0/CA/actions/workflows/tests.yml/badge.svg)](https://github.com/Amshu0-0/CA/actions/workflows/tests.yml)
+[![tests](https://github.com/Amshu0-0/LogBERT-project/actions/workflows/tests.yml/badge.svg)](https://github.com/Amshu0-0/LogBERT-project/actions/workflows/tests.yml)
 
 CSCI 390 - Natural Language Processing and Applications · Instructor: Dr. Qi Li
 Project type: research reproduction and extension (closest to Option 1, Text Classification, applied to system logs)
@@ -24,6 +24,9 @@ future). *g* and *r* are tuned on the validation period only, and every number b
   embedded in [`notebooks/results_reported_run.ipynb`](notebooks/results_reported_run.ipynb)
 - Run 2 (the full training recipe on a free Colab GPU): [`notebooks/train_on_gpu.ipynb`](notebooks/train_on_gpu.ipynb),
   with its results in [`results_gpu/`](results_gpu/README.md)
+
+**To run the code yourself** (download, install, a one-minute check, the full experiment, the demo), see
+[How to run it, step by step](#how-to-run-it-step-by-step).
 
 ## Results
 
@@ -122,75 +125,161 @@ results/            run 1: metrics, LogBERT checkpoint, predictions, analysis
 results_gpu/        run 2 (GPU): the same, plus figures
 ```
 
-## Setup
+## How to run it, step by step
 
-Python 3.10 or newer.
+Everything here is typed into a terminal (from step 3 on, inside the `NLP` folder). The commands are for macOS
+and Linux; the Windows differences are noted. Every `make` command stands for plain Python commands, which are
+listed in step 5 and in the `Makefile`, so `make` is optional.
+
+### 1. What you need
+
+- **Python 3.10 or newer.** Check it with `python3 --version`.
+- **Internet**, for the install and for the data download.
+- **Disk space.** The BGL log is about 700 MB unpacked. The prepared data, the model and the results come on top.
+- **No GPU is needed.** Run 1 was made on an ordinary 4-core CPU; it only takes longer (about an hour of
+  training). For a free GPU, see step 6.
+- **`make`** is optional. On a Mac it comes with Apple's command line tools (`xcode-select --install`).
+  On Windows, use the Python commands.
+
+### 2. Get the code
 
 ```bash
-python -m venv .venv
+git clone https://github.com/Amshu0-0/LogBERT-project.git "$HOME/LogBERT-project"
+cd "$HOME/LogBERT-project/NLP"
+```
+
+`NLP` contains the research code. The folder `NLP-pipeline` next to it contains the cloud pipeline and the
+live dashboard that use this package. Keep both folders side by side. The [top-level README](../README.md)
+has the quickest way to open the dashboard with the included model.
+
+### 3. Install
+
+```bash
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` installs this package in editable mode with all extras (`demo`, `dev`, `docs`). For a
-lighter install, use `pip install -e ".[dev]"`. On a machine without a GPU you can avoid the large
-CUDA wheels by installing PyTorch first:
+- Line 1 makes a private copy of Python for this project (the folder `.venv`), so nothing else on your computer
+  changes.
+- Line 2 switches it on. Do it again in every new terminal window; the prompt starts with `(.venv)` while it is
+  on. On Windows the line is `.venv\Scripts\activate`.
+- Line 3 installs PyTorch and the other packages, and this project itself (as the package `logad`). PyTorch is a
+  big download.
+
+Two variations. On a Linux CPU machine you can get the CPU build of PyTorch: run
+`pip install torch --index-url https://download.pytorch.org/whl/cpu` before line 3. If you only want to run the
+code and the tests (no demo, no figures), use `pip install -e ".[dev]"` instead of line 3.
+
+### 4. Check that it works
+
+First the tests. They need no internet and download nothing:
 
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cpu
+make test
 ```
 
-## Quick check: the whole pipeline in about a minute
+You should see `101 passed`. (Without `make`: `python -m pytest`.)
+
+Then the whole project on a tiny sample, which takes about a minute:
 
 ```bash
 make smoke
 ```
 
-This downloads Loghub's 2,000-line BGL sample, preprocesses it, trains a tiny LogBERT on the CPU,
-tunes and evaluates both variants, and writes the comparison and analysis to `outputs/bgl_2k/`. The sample is
-spread over seven months, so its windows are nearly empty and **its numbers mean nothing**; it only
-checks that everything runs.
-
-## Full experiment
-
-Run the stages with `make all` (after `make data`) or follow along below. Each script accepts `--config` and any
-number of `--set section.key=value` overrides. A GPU is strongly recommended; the notebook
-`notebooks/train_on_gpu.ipynb` does everything on a free Colab T4 (run 2).
+It downloads Loghub's 2,000-line BGL sample, prepares it, trains a tiny LogBERT on the CPU, tunes and tests both
+variants, and writes the comparison table and the error analysis into `outputs/bgl_2k/`. The sample is spread
+over seven months, so its windows are almost empty and **its numbers mean nothing**. It only shows that every
+step runs. Without `make`, these are the same steps:
 
 ```bash
-python scripts/download_data.py      # full BGL from Loghub (Zenodo), ~700 MB unpacked
-python scripts/preprocess.py         # templates, split and windows -> data/processed/bgl/
+python scripts/download_data.py --dataset bgl_2k
+python scripts/preprocess.py --config configs/bgl_2k.yaml
+python scripts/train_logbert.py --config configs/bgl_2k.yaml
+python scripts/evaluate_logbert.py --config configs/bgl_2k.yaml
+python scripts/evaluate_logbert.py --config configs/bgl_2k.yaml --set logbert.detection.full_coverage=true
+python scripts/compare.py --config configs/bgl_2k.yaml
+python scripts/analyze.py --config configs/bgl_2k.yaml
+```
+
+### 5. The full experiment on your own computer (run 1)
+
+The stages, in the order they run:
+
+| Stage | With `make` | Without `make` | What it does |
+|---|---|---|---|
+| Download | `make data` | `python scripts/download_data.py` | Gets the BGL log (4.7 million lines, about 700 MB unpacked) into `data/raw/BGL.log` |
+| Prepare | `make preprocess` | `python scripts/preprocess.py` | Finds the message templates (Drain), splits the timeline 60/20/20, cuts the 5-minute windows, and writes them to `data/processed/bgl/` |
+| Train | `make logbert-train` | `python scripts/train_logbert.py` | Trains LogBERT on the normal training windows |
+| Test | `make logbert-eval` | `python scripts/evaluate_logbert.py`, then again with `--set logbert.detection.full_coverage=true` | Picks *g* and *r* on the validation period, then scores the test period, for A and for A+ |
+| Tables | `make compare analyze` | `python scripts/compare.py`, `python scripts/analyze.py` | The results table and the error analysis |
+| Figures | `make figures` | `python scripts/make_figures.py` | The seven figures, into `docs/figures/` |
+
+To repeat run 1, add `CONFIG=configs/bgl_cpu.yaml` to every `make` command (or `--config configs/bgl_cpu.yaml` to
+every script). The config is what tells the code which run this is: `bgl_cpu.yaml` is run 1 (the CPU, 6
+epochs, duplicate sequences dropped), `bgl_gpu.yaml` is run 2, `bgl.yaml` is the full recipe of the paper
+(up to 50 epochs; far too slow on a CPU), `bgl_2k.yaml` is the tiny check of step 4. On a Mac with Apple
+silicon, `bgl.yaml` would pick the Apple GPU by itself; `bgl_cpu.yaml` always uses the CPU, as in the reported
+run 1.
+
+The two commands for the whole run:
+
+```bash
+make data
 ```
 
 ```bash
-python scripts/train_logbert.py
-python scripts/evaluate_logbert.py                                            # A
-python scripts/evaluate_logbert.py --set logbert.detection.full_coverage=true # A+
+make all CONFIG=configs/bgl_cpu.yaml
+```
+
+`make all` runs *prepare*, *train*, *test*, *tables* in this order. Training alone took about 60 minutes on
+4 cores. The training prints a line after every epoch and the template step shows a progress bar, so a slow
+step is not a frozen one.
+
+When it is done, everything of the run is in `outputs/bgl_cpu/`:
+
+| File | What it is |
+|---|---|
+| `results/comparison.md` | The table: precision, recall, F1 of A and A+ on the test period |
+| `analysis/analysis.md` | The error analysis: which alerts are missed, which templates are behind the false alarms |
+| `predictions/` | The verdict for every test window |
+| `logbert/model.pt` | The trained model (`history.json` next to it has the loss of every epoch) |
+
+Your numbers should be close to the tables above, not necessarily identical: training starts from random
+numbers, and a different computer or library version changes the result a little.
+
+Two commands change files that are already in the repository, so use them on purpose:
+
+- `make figures CONFIG=configs/bgl_cpu.yaml` writes into `docs/figures/`, where the figures of run 1 are. To
+  keep those, write somewhere else:
+  `python scripts/make_figures.py --config configs/bgl_cpu.yaml --out my_figures`.
+- `make results OUT=outputs/bgl_cpu` copies the run into `results/`, over the committed files of run 1.
+
+### 6. Run 2: a free GPU on Google Colab
+
+[Open `notebooks/train_on_gpu.ipynb` in Colab](https://colab.research.google.com/github/Amshu0-0/LogBERT-project/blob/main/NLP/notebooks/train_on_gpu.ipynb),
+then choose *Runtime ▸ Change runtime type ▸ T4 GPU* and *Runtime ▸ Run all*. The notebook downloads the code and
+the BGL log by itself and does everything of step 5: it downloads and prepares the data (the notebook estimates
+20 to 40 minutes), trains (the reported run stopped after 22 epochs, 42 minutes), tests, makes the figures, and
+at the end downloads a zip with the results. Colab asks once for permission to use your Google Drive: the
+prepared data and the model are kept there (folder `CA-NLP-run`), so a lost connection does not lose the work.
+Keep the browser tab open until the last cell.
+
+The switches are in the first code cell: `SMOKE = True` runs the whole notebook on the 2,000-line sample in about
+2 minutes (the numbers mean nothing); `USE_DRIVE` and `DRIVE_FOLDER` are the Google Drive settings; `BRANCH` is
+the branch of this GitHub repository that the notebook downloads its code from (`main`).
+
+### 7. The demo: a web page on your computer
+
+The demo needs a trained model and the prepared data. To use the model that is already in the repository (run 1),
+without training anything:
+
+```bash
+make data
 ```
 
 ```bash
-python scripts/compare.py            # -> outputs/bgl/results/comparison.{md,csv}
-python scripts/analyze.py            # -> outputs/bgl/analysis/analysis.md
-python scripts/make_figures.py       # -> docs/figures/
-make results                         # copy the deliverables into results/ for git
-```
-
-With `configs/bgl.yaml` the training recipe is the full one of the paper (up to 50 epochs); on a CPU
-use `--config configs/bgl_cpu.yaml` (the reported run 1: duplicate sequences dropped, 6 epochs, about an
-hour on 4 cores), on a GPU use `--config configs/bgl_gpu.yaml` (run 2). Pass the same `--config` to every script.
-
-## Live demo
-
-```bash
-python app/demo.py            # http://127.0.0.1:7860
-python app/demo.py --share    # temporary public link for the class
-```
-
-To demo the reported run without retraining anything, preprocess the data, then put the committed
-model and results back in place and point the demo at that run:
-
-```bash
-make data preprocess
+make preprocess CONFIG=configs/bgl_cpu.yaml
 ```
 
 ```bash
@@ -198,15 +287,31 @@ make restore OUT=outputs/bgl_cpu
 ```
 
 ```bash
-python app/demo.py --config configs/bgl_cpu.yaml --share
+make demo CONFIG=configs/bgl_cpu.yaml
 ```
 
-- **Paste a log line.** A full BGL line has its alert tag removed (shown as ground truth). The line is
-  matched to its Drain template and inserted into a normal test window. You then see LogBERT's verdict:
-  how many hidden keys fell outside the top-*g*, the rank of your line's key, and the count without your line.
+Then open <http://127.0.0.1:7860> in a browser. Stop it with Ctrl+C. (Without `make`:
+`python app/demo.py --config configs/bgl_cpu.yaml`. Add `--share` for a temporary public link, which needs
+internet and stops working when you stop the program; add `--port 7861` if the port is taken.)
+
+- **Paste a log line.** A full BGL line has its alert tag removed (shown as the ground truth). The line is matched
+  to its Drain template and put into a normal test window. You see LogBERT's verdict: how many hidden keys fell
+  outside the top-*g*, the rank of your line's key, and the count without your line.
 - **Insert into a window.** Choose a normal test window and insert any message at any position.
 
-If the trained model is missing, the demo says "not available" instead of failing.
+If the trained model is missing, the demo says "not available" instead of failing. If you trained a run yourself,
+point the demo at it with its config, for example `--config configs/bgl_cpu.yaml` after step 5.
+
+### 8. If something goes wrong
+
+| What you see | What to do |
+|---|---|
+| `make: command not found` | Install the command line tools (`xcode-select --install` on a Mac), or use the Python commands. |
+| `python: command not found` | Use `python3`, or switch the environment on (step 3, line 2). With `make`, add `PY=python3`. |
+| `ModuleNotFoundError: No module named 'logad'` | The environment is not on, or step 3 was not done in this folder. Do lines 2 and 3 of step 3 again. |
+| The download stops or fails | Run `make data` again. If `data/raw/BGL.log` exists but looks wrong, add `--force` to `python scripts/download_data.py`. The program tries two addresses; both are at the top of `src/logad/data/download.py`, so you can also download the log by hand, unpack it and put `BGL.log` into `data/raw/`. |
+| The demo says "not available" | There is no trained model in the run folder. Do the `make restore` line of step 7 (or train a run, step 5). |
+| Everything is slow | CPU training time depends on the machine. The reported CPU run took about an hour. Use Colab (step 6) for a GPU. |
 
 ## Design decisions
 

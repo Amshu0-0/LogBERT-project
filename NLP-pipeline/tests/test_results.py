@@ -19,17 +19,15 @@ LOG = "\n".join([
 ])
 
 
-def window(start, truth, logbert, llm, keyword, ms=10.0):
-    return {"start": start, "truth": truth, "n_messages": 5, "truth_alerts": truth, "logbert": logbert, "llm": llm, "keyword": keyword, "logbert_missed": 9 * logbert, "score_ms": ms}
+def window(start, truth, logbert, ms=10.0):
+    return {"start": start, "truth": truth, "n_messages": 5, "truth_alerts": truth, "logbert": logbert, "logbert_missed": 9 * logbert, "score_ms": ms}
 
 
-WINDOWS = [window(1000, 1, 1, 1, 1), window(1060, 1, 1, 0, 1), window(1120, 0, 1, 0, 0), window(1180, 0, 0, 0, 0), window(1240, 0, 0, 1, 0)]
+WINDOWS = [window(1000, 1, 1), window(1060, 1, 1), window(1120, 0, 1), window(1180, 0, 0), window(1240, 0, 0)]
 
 
-def make_summary(status="complete", keyword_fp_extra=0):
-    summary = {"run": {"run": "run-new", "status": status}, "lines": {"stored": 30, "with_alert_tag": 2, "template_not_known": 0, "llm_has_no_saved_decision": 3}, **summarize(WINDOWS)}
-    summary["detectors"]["keyword"]["fp"] += keyword_fp_extra
-    return summary
+def make_summary(status="complete"):
+    return {"run": {"run": "run-new", "status": status}, "lines": {"stored": 30, "with_alert_tag": 2, "template_not_known": 0}, **summarize(WINDOWS)}
 
 
 class Cluster:
@@ -100,7 +98,8 @@ def test_it_waits_for_the_processor_and_then_prints_the_table(world, capsys):
     assert "the processor has not stored anything of run-new yet" in shown
     assert "running: 500 lines and 3 windows stored so far" in shown
     assert "Replay run-new   status: complete" in shown
-    assert "keyword rules (B4)" in shown and "RESULT: PASS" in shown
+    assert "LogBERT, full coverage (A+)" in shown and "RESULT: PASS" in shown
+    assert "keyword" not in shown and "LLM" not in shown
     assert any(call.startswith("/summary?run=run-new") for call in cluster.calls)
 
 
@@ -147,6 +146,7 @@ def test_windows_with_alerts_are_listed(world, capsys):
     shown = capsys.readouterr().out
 
     assert "The first 2 windows that hold an alert line" in shown and "1970-01-01 00:16" in shown
+    assert "LogBERT" in shown and "keywords" not in shown
 
 
 def test_the_cluster_is_compared_with_the_laptop(world, tmp_path, capsys):
@@ -155,9 +155,9 @@ def test_the_cluster_is_compared_with_the_laptop(world, tmp_path, capsys):
     saved.write_text(json.dumps(make_summary()), encoding="utf-8")
 
     assert results.main(["--compare", str(saved)]) == 0
-    assert "give the same numbers for every detector" in capsys.readouterr().out
+    assert "give the same numbers" in capsys.readouterr().out
 
-    # a difference in LogBERT alone is explained and tolerated; one in the keyword rules is a failure
+    # a difference in LogBERT's counts alone is explained and tolerated; one in the windows or the lines is a failure
     other = make_summary()
     other["detectors"]["logbert"]["tp"] += 1
     saved.write_text(json.dumps(other), encoding="utf-8")
@@ -165,10 +165,12 @@ def test_the_cluster_is_compared_with_the_laptop(world, tmp_path, capsys):
     assert results.main(["--compare", str(saved)]) == 0
     assert "LogBERT can differ by a window or two" in capsys.readouterr().out
 
-    saved.write_text(json.dumps(make_summary(keyword_fp_extra=3)), encoding="utf-8")
+    other = make_summary()
+    other["anomalous_windows"] += 1
+    saved.write_text(json.dumps(other), encoding="utf-8")
 
     assert results.main(["--compare", str(saved)]) == 1
-    assert "keyword rules (B4): fp laptop" in capsys.readouterr().out
+    assert "anomalous_windows: laptop 3, cluster 2" in capsys.readouterr().out
 
 
 def test_the_windows_of_the_nlp_code_are_compared_with_the_cluster(world, capsys):

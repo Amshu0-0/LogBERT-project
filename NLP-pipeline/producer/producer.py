@@ -14,6 +14,10 @@
 #   - The raw line still carries the alert tag (the ground truth of the dataset). The processor splits it off in its first step and keeps it
 #     for the evaluation only; no detector ever sees it. It travels with the line because this is an evaluation replay.
 #
+# Waiting for Kafka: Kafka may not be ready when the pod starts (a cold cluster, or Kafka starting again). The connection is tried again
+# until it works, and the log says what the producer waits for. (Version 1.0.0 stopped at the first failed connection, and the Job's pod
+# went into Error.) After START_WAIT_SECONDS the producer gives up with a clear message; the Job's own rules decide what happens next.
+#
 # What is kept from CA3: the settings come from the ConfigMap pipeline-config (no defaults for where to connect), Kafka is reached over TLS
 # with a client certificate (mutual TLS), SIGTERM stops the program, every log line is one JSON object, and /metrics serves the numbers.
 
@@ -31,6 +35,11 @@ SERVICE = "producer"
 
 # After this many lines the producer waits until Kafka has confirmed them. Without it the library's queue in memory grows without limit.
 DEFAULT_FLUSH_EVERY = 500
+
+# How long the producer waits for Kafka to accept its first connection. It is shorter than the 5 minutes that the smoke Job may take
+# in all (activeDeadlineSeconds in producer/smoke/job-smoke.yaml), so the producer says why it gave up and the Job does not just vanish.
+# START_WAIT_SECONDS in the environment changes it.
+START_WAIT_SECONDS = 180
 
 
 # One log line = one JSON object on standard output. Extra fields are given as keyword arguments.
@@ -68,6 +77,9 @@ class Settings:
         self.lines_per_second = float(os.environ.get("LINES_PER_SECOND", "0"))
         self.limit = int(os.environ["MAX_ROWS"]) if os.environ.get("MAX_ROWS") else None
         self.flush_every = int(os.environ.get("FLUSH_EVERY_ROWS", str(DEFAULT_FLUSH_EVERY)))
+
+        # How long to wait for Kafka to accept the first connection, in seconds.
+        self.start_wait_seconds = float(os.environ.get("START_WAIT_SECONDS", str(START_WAIT_SECONDS)))
 
         # The name of this replay. Every document that the processor stores carries it. One is made up if none is given.
         self.run = os.environ.get("RUN_ID") or datetime.now(timezone.utc).strftime("run-%Y%m%d-%H%M%S")
@@ -189,10 +201,61 @@ def send_one_line(producer, topic, lines, trace_id):
     return stored
 
 
-def build_producer(settings):
-    from kafka import KafkaProducer
+# Runs action() until it works, and returns what it returned. A failure of a kind in retry_on means "not ready yet": it is logged (the first
+# time, then every fifth time) and action() is tried again after a pause of 2 seconds, then 4, 8 and at most 15. A failure of a kind in
+# give_up_on is a mistake in the settings: it ends the program at once. After `deadline` seconds the program ends too. stop() is true after
+# SIGTERM: the program leaves quietly. (The same helper is in processor/processor.py: the two images share no file.)
+def wait_until(what, action, retry_on, deadline, give_up_on=(), stop=lambda: False):
+    started = time.monotonic()
+    pause = 2.0
+    tries = 0
 
-    # Kafka over TLS. ssl_check_hostname makes the producer check that the certificate Kafka shows names the host it connected to.
+    while True:
+        tries += 1
+
+        try:
+            result = action()
+        except retry_on as error:
+            waited = time.monotonic() - started
+            facts = {"tries": tries, "waited_seconds": round(waited), "error": error.__class__.__name__, "detail": str(error)[:300]}
+
+            if isinstance(error, give_up_on):
+                log("error", f"cannot go on without {what}: this is a mistake in the settings, and waiting does not mend it", **facts)
+                sys.exit(1)
+
+            if waited >= deadline:
+                log("error", f"gave up waiting for {what}", **facts)
+                sys.exit(1)
+
+            if stop():
+                log("info", f"stopped while waiting for {what}")
+                sys.exit(0)
+
+            if tries == 1 or tries % 5 == 0:
+                log("warning", f"waiting for {what}", **facts)
+
+            time.sleep(pause)
+            pause = min(pause * 2, 15.0)
+            continue
+
+        if tries > 1:
+            log("info", f"{what} is ready", tries=tries, waited_seconds=round(time.monotonic() - started))
+
+        return result
+
+
+def build_producer(settings, stop=lambda: False):
+    from kafka import KafkaProducer
+    from kafka.errors import KafkaConfigurationError, KafkaError
+
+    # The library says "Unable to bootstrap" (KafkaTimeoutError) after 30 seconds when Kafka does not answer: a cold cluster, or a broker
+    # that listens but has not finished starting. That is waited for; a wrong setting (KafkaConfigurationError) is not.
+    return wait_until("Kafka", lambda: connect_producer(settings, KafkaProducer), (KafkaError, OSError), settings.start_wait_seconds,
+                      KafkaConfigurationError, stop)
+
+
+# Kafka over TLS. ssl_check_hostname makes the producer check that the certificate Kafka shows names the host it connected to.
+def connect_producer(settings, KafkaProducer):
     return KafkaProducer(
         bootstrap_servers=settings.broker,
         security_protocol="SSL",
@@ -230,7 +293,7 @@ def main():
     if not lines:
         sys.exit(f"{settings.dataset} has no lines to replay")
 
-    producer = build_producer(settings)
+    producer = build_producer(settings, stop=lambda: not running)
 
     if args.trace_id:
         send_one_line(producer, settings.topic, lines, args.trace_id)

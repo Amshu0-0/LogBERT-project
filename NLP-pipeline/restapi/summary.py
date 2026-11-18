@@ -1,15 +1,12 @@
-# The numbers that describe a replay: for each detector, how its verdicts on the windows compare with the ground truth (the BGL alert tags).
+# The numbers that describe a replay: how LogBERT's verdicts on the windows compare with the ground truth (the BGL alert tags).
 # No dependencies, so the REST API (restapi/rest_app.py) and the local replay (scripts/local-replay.py) calculate it the same way.
 #
-# A window is "truth" if it holds at least one line with an alert tag; a detector flags a window if its verdict (0 or 1) is 1. For the LLM
-# a template without a saved decision counts as "not flagged" (the saved experiment covers the templates of its validation and test
-# periods, not every template that exists).
+# A window is "truth" if it holds at least one line with an alert tag; LogBERT flags a window if its verdict (0 or 1) is 1.
 
-# (field in the window documents, name shown to people). The letters are the conditions of the NLP project's report.
+# (field in the window documents, name shown to people). The name is the variant of the NLP project's report. The program goes through
+# this list wherever it needs the detectors, so it has one entry.
 DETECTORS = (
     ("logbert", "LogBERT, full coverage (A+)"),
-    ("llm", "rule-guided LLM, saved decisions (B3)"),
-    ("keyword", "keyword rules (B4)"),
 )
 
 

@@ -1,6 +1,6 @@
-# This program provides a small REST API for checking the database and for reading the results of the log-anomaly detectors.
-# It is the CA3 REST API with new endpoints for the new data: replays ("runs"), windows with the verdict of each detector, single log
-# lines, and a summary that compares every detector with the ground truth.
+# This program provides a small REST API for checking the database and for reading the results of the log-anomaly detector (LogBERT).
+# It is the CA3 REST API with new endpoints for the new data: replays ("runs"), windows with LogBERT's verdict, single log
+# lines, and a summary that compares LogBERT with the ground truth.
 #
 # It is written to run in a Kubernetes pod, which adds these things to the basic job (all of them are the same as in CA3):
 #   1. The MongoDB credentials come from files that Kubernetes mounts from a Secret (MONGO_USER_FILE and MONGO_PASSWORD_FILE).
@@ -16,8 +16,8 @@
 #   /health, /ready                       probes (no login)
 #   /stats                                how many documents each collection holds
 #   /runs                                 the replays, newest first, with their status and how many lines and windows they have
-#   /summary?run=                         per detector: true/false positives and negatives, precision, recall, F1, on the windows of a run
-#   /windows?run=&flagged=&limit=&skip=   the windows of a run in time order; flagged=truth|logbert|llm|keyword keeps those with that verdict 1
+#   /summary?run=                         true/false positives and negatives, precision, recall, F1 of LogBERT on the windows of a run
+#   /windows?run=&flagged=&limit=&skip=   the windows of a run in time order; flagged=truth|logbert keeps those with that verdict 1
 #   /events?run=&alert=1&limit=&skip=     the log lines of a run in order; alert=1 keeps the lines that carry an alert tag
 #   /alerts                               up to 50 log lines that carry an alert tag (the lines of the latest run)
 #   /events/<trace_id>                    the stored log line of the end-to-end smoke test
@@ -330,7 +330,7 @@ def get_runs():
     return jsonify({"count": len(found), "runs": found})
 
 
-# How well each detector did on the windows of a run: the numbers of the NLP project's evaluation, for this replay.
+# How well LogBERT did on the windows of a run: the numbers of the NLP project's evaluation, for this replay.
 @app.route("/summary", methods=["GET"])
 def get_summary():
     run = pick_run()
@@ -345,16 +345,15 @@ def get_summary():
     lines = events.count_documents({"run": run})
     alert_lines = events.count_documents({"run": run, "alert": 1})
     unseen = events.count_documents({"run": run, "template_id": -1})
-    no_decision = events.count_documents({"run": run, "llm": None})
 
     return jsonify({
         "run": public_run(document),
-        "lines": {"stored": lines, "with_alert_tag": alert_lines, "template_not_known": unseen, "llm_has_no_saved_decision": no_decision},
+        "lines": {"stored": lines, "with_alert_tag": alert_lines, "template_not_known": unseen},
         **result,
     })
 
 
-# The windows of a run in time order. ?flagged=truth|logbert|llm|keyword keeps the windows whose verdict (or the truth) is 1.
+# The windows of a run in time order. ?flagged=truth|logbert keeps the windows whose verdict (or the truth) is 1.
 @app.route("/windows", methods=["GET"])
 def get_windows():
     run = pick_run()

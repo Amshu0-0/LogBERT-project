@@ -73,7 +73,7 @@ def mistakes():
         change_yaml(root, "namespace.yaml", lambda docs: docs[0]["metadata"]["labels"].pop("pod-security.kubernetes.io/enforce"))
 
     def wrong_tag(root):
-        change_yaml(root, "processor/processor.yaml", lambda docs: container(docs, "Deployment", "processor", "processor").update(image="ghcr.io/amshu0-0/nlp-processor:1.0.1"))
+        change_yaml(root, "processor/processor.yaml", lambda docs: container(docs, "Deployment", "processor", "processor").update(image="ghcr.io/amshu0-0/nlp-processor:never-built"))
 
     def latest_image(root):
         change_yaml(root, "observability/kafka-exporter.yaml", lambda docs: container(docs, "Deployment", "kafka-exporter").update(image="danielqsj/kafka-exporter"))
@@ -156,7 +156,7 @@ def mistakes():
     return [
         ("a pod in another namespace", processor_ns, {NAMESPACE}, "is in the namespace 'default'"),
         ("pod security switched off", no_pod_security, {NAMESPACE}, "does not enforce the Pod Security level"),
-        ("an image tag that was never built", wrong_tag, {IMAGES}, "has the tag 1.0.1, but the file VERSION says"),
+        ("an image tag that was never built", wrong_tag, {IMAGES}, "has the tag never-built, but the file VERSION says"),
         ("an image without a tag", latest_image, {IMAGES}, "has no fixed tag"),
         ("a container that may escalate", privileged, {SECURITY}, "allowPrivilegeEscalation is not false"),
         ("a container without limits", no_limits, {RESOURCES}, "no limits for cpu"),

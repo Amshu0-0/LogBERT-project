@@ -48,8 +48,8 @@ def test_an_uninterrupted_replay_makes_events_windows_and_a_finished_run():
         assert window["n_messages"] == len(inside)
         assert window["truth_alerts"] == sum(e["alert"] for e in inside)
         assert window["truth"] == int(window["truth_alerts"] > 0)
-        assert window["keyword_hits"] == sum(e["keyword"] for e in inside)
-        assert window["llm_hits"] == sum(1 for e in inside if e["llm"] == 1)
+        assert window["n_templates"] == len({e["template_id"] for e in inside})
+        assert window["logbert"] == int(window["logbert_missed"] > 2) and window["logbert_chunks"] == 1
         assert window["first_offset"] == min(e["offset"] for e in inside) and window["last_offset"] == max(e["offset"] for e in inside)
         seen.update(e["offset"] for e in inside)
 
@@ -159,7 +159,8 @@ def test_smoke_lines_are_stored_with_their_trace_id_and_do_not_enter_a_window():
     assert out.windows == [] and engine.run is None and out.runs == {}
     (event,) = out.events
     assert event["trace_id"] == "abc-123" and event["smoke"] is True and event["alert"] == 1 and event["_id"] == "smoke:0"
-    assert event["template_id"] == 11 and event["llm"] == 1
+    assert event["template_id"] == 11 and event["template"] == "template 11" and event["content"] == "t11"
+    assert not {"keyword", "keyword_rule", "llm"} & set(event)
     assert out.logs[0][1] == "stored" and out.logs[0][2]["trace_id"] == "abc-123"
 
 

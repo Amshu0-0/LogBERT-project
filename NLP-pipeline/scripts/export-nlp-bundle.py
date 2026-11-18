@@ -3,31 +3,28 @@
 #   make export-bundle                                     (run it in the Python environment of your NLP project)
 #   python3 NLP-pipeline/scripts/export-nlp-bundle.py --nlp-root NLP --lines 30000
 #
-# What ends up in bundle/ (the processor image holds the first five, the producer image holds the replay file):
+# What ends up in bundle/ (the processor image holds the first three, the producer image holds the replay file):
 #   drain.pkl                        the fitted Drain parser: log text -> template ID            from  data/processed/bgl/
 #   model.pt                         the trained LogBERT                                          from  results/logbert/ or outputs/<run>/logbert/
-#   rules.json                       the ranked keyword rules (condition B4)                      from  NLP-pipeline/reference/ (see its README)
-#   llm_rule_based_decisions.csv     the saved decisions of the rule-guided LLM (condition B3)    from  NLP-pipeline/reference/
-#   settings.json                    g, r, mask ratio, seed, window size, number of rules: the values of your experiment
+#   settings.json                    g, r, mask ratio, seed, window size: the values of your experiment
 #   bgl-replay.log                   the log lines to replay: a slice of the TEST period of your split, in time order, as BGL lines
 #   replay-info.json                 facts about that slice (lines, windows, anomalous windows, largest window), for the checks
 #
 # The configuration says where the processed data and the working folder outputs/ are, and the window and the seed. It is read with the NLP
 # project's own loader, so one that inherits from another (configs/bgl_cpu.yaml extends configs/bgl.yaml) works: make export-bundle uses the
-# one that the committed results come from (see NLP/results/README.md). The keyword rules and the saved decisions are not made by the NLP
-# project any more (it is LogBERT only): they are the files of its first version, kept unchanged in NLP-pipeline/reference/.
+# one that the committed results come from (see NLP/results/README.md).
 #
 # results/ is the run that your report describes (it is what "make results" copies there and what is committed), so it is taken first. A run that
 # is only in outputs/ (not copied to results/ yet) is taken with --prefer-outputs. If both exist and differ, the script says so.
 #
 # The replay file: a run of consecutive messages of the test period (the period that the detectors were NOT tuned on), 30,000 lines by
-# default, placed where the windows are most evenly mixed between anomalous and normal ones (so the three detectors have something to find
+# default, placed where the windows are most evenly mixed between anomalous and normal ones (so LogBERT has something to find
 # and something to get wrong). --start N takes the slice that begins at message N of the test period instead. The lines are the raw BGL
 # lines if data/raw/BGL.log is there, otherwise they are rebuilt from messages.parquet in the same layout; either way every line is parsed
 # again and compared with messages.parquet (timestamp, alert tag, node, component, level, text) before the file is written.
 #
 # The files are made in a folder of their own next to bundle/ (.bundle-new-...), and the processor's own loader reads them there (the same code
-# the processor runs at start-up). It stops with a clear message if drain.pkl does not belong to model.pt and the decisions, which would make
+# the processor runs at start-up). It stops with a clear message if drain.pkl does not belong to model.pt, which would make
 # every verdict wrong without any error. Only when everything is right are the files put into bundle/; a run that stops leaves bundle/ exactly
 # as the last good run left it. (An earlier version wrote into bundle/ first and checked afterwards, so a refused run left a mix of two runs.)
 #
@@ -48,16 +45,11 @@ HERE = Path(__file__).resolve().parent
 PIPELINE = HERE.parent
 REPO = PIPELINE.parent
 
-# The keyword rules and the saved decisions of the first version of the NLP project (unchanged), and how many of the ranked rules the keyword
-# detector uses (the top 30, as in that experiment).
-REFERENCE = PIPELINE / "reference"
-KEYWORD_TOP_K = 30
-
 # The columns of messages.parquet that the replay file is made from (written by logad.data.bgl.read_bgl and logad.data.preprocess).
 COLUMNS = ["line_id", "timestamp", "node", "component", "level", "content", "alert_tag", "label", "template_id", "split"]
 
 # The files of the bundle, in the order in which they are put in place (the facts about the replay file last).
-BUNDLE_FILES = ("drain.pkl", "model.pt", "rules.json", "llm_rule_based_decisions.csv", "settings.json", "bgl-replay.log", "replay-info.json")
+BUNDLE_FILES = ("drain.pkl", "model.pt", "settings.json", "bgl-replay.log", "replay-info.json")
 
 # A window of the replay with more lines than this is reported (the processor handles much more, see processor.yaml, but it is worth knowing).
 BIG_WINDOW = 20000
@@ -136,10 +128,6 @@ def locate(args):
         "windows": first_existing([processed / "windows.parquet"], "windows.parquet (the windows of the NLP project)", again),
         "model": pick(results / "logbert" / "model.pt", output / "logbert" / "model.pt", "model.pt (the trained LogBERT)",
                       "Train it with  make logbert-train  in the NLP folder, or  make restore  to copy the committed results back.", prefer, differs),
-        "rules": first_existing([REFERENCE / "rules.json"], "rules.json (the ranked keyword rules)",
-                                "It belongs to the repository: restore NLP-pipeline/reference/ with  git checkout -- NLP-pipeline/reference ."),
-        "decisions": first_existing([REFERENCE / "llm_rule_based_decisions.csv"], "llm_rule_based_decisions.csv (the saved decisions of the rule-guided LLM)",
-                                    "It belongs to the repository: restore NLP-pipeline/reference/ with  git checkout -- NLP-pipeline/reference ."),
         "logbert_result": pick(results / "logbert_full.json", output / "results" / "logbert_full.json", "logbert_full.json (the tuned g and r of LogBERT with full coverage)",
                                "Make it with  make logbert-eval  in the NLP folder, or  make restore  to copy the committed results back.", prefer, differs),
     }
@@ -159,7 +147,6 @@ def make_settings(config, result):
         raise Problem("logbert_full.json is not the full-coverage variant (A+): its settings say full_coverage = false")
 
     return {
-        "keyword_top_k": KEYWORD_TOP_K,
         "logbert": {"g": int(chosen["g"]), "r": int(chosen["r"]), "mask_ratio": float(chosen["mask_ratio"]), "full_coverage": True, "seed": int(detection["seed"])},
         "window": {"size_seconds": int(config["windows"]["size_seconds"]), "step_seconds": int(config["windows"]["step_seconds"])},
         "from": {"experiment": config.get("name"), "logbert_full_test_f1": round(float(result.get("test", {}).get("f1", 0.0)), 4)},
@@ -424,11 +411,9 @@ def run(args):
     say("  configuration:   %s (experiment name: %s)" % (where["config_path"], config.get("name")))
     say("  processed data:  " + str(where["processed"]))
 
-    for name in ("model", "rules", "decisions"):
-        say("  %-16s %s" % (name + ":", where[name]))
+    say("  %-16s %s" % ("model:", where["model"]))
 
     say("  LogBERT:         g=%d, r=%d, mask ratio %.1f, full coverage, seed %d" % (settings["logbert"]["g"], settings["logbert"]["r"], settings["logbert"]["mask_ratio"], settings["logbert"]["seed"]))
-    say("  keyword rules:   the top %d of the rules in %s" % (settings["keyword_top_k"], REFERENCE))
     say("  windows:         %d seconds, sliding by %d seconds" % (size, step))
 
     for what, chosen, other in where["differs"]:
@@ -484,7 +469,7 @@ def run(args):
     stage = Path(tempfile.mkdtemp(prefix=".bundle-new-", dir=out.parent))
 
     try:
-        for name, source in (("drain.pkl", where["drain"]), ("model.pt", where["model"]), ("rules.json", where["rules"]), ("llm_rule_based_decisions.csv", where["decisions"])):
+        for name, source in (("drain.pkl", where["drain"]), ("model.pt", where["model"])):
             shutil.copyfile(source, stage / name)
 
         (stage / "settings.json").write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
@@ -516,7 +501,7 @@ def run(args):
     say(f"  windows:          {facts['windows']}, of which anomalous: {facts['anomalous_windows']}   (5-minute windows sliding by 1 minute, the grid starts at the first line of the file)")
     say(f"  largest window:   {facts['largest_window_lines']} lines")
     say(f"  Drain check:      the parser gives the template that messages.parquet holds for {agree} of {len(rows)} lines ({unseen} lines match no template)")
-    say("  the bundle loads: the models, the rules and the decisions belong together (the processor's own loader accepted them)")
+    say("  the bundle loads: drain.pkl and model.pt belong together (the processor's own loader accepted them)")
 
     if facts["anomalous_windows"] == 0 or facts["anomalous_windows"] == facts["windows"]:
         say("\nNote: every window of this replay file has the same truth, so the table of results will say little. Try another place with  --start N")

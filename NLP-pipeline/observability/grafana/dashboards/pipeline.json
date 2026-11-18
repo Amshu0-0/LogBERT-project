@@ -1,7 +1,7 @@
 {
   "uid": "nlp-pipeline",
   "title": "NLP log pipeline",
-  "description": "Producer, Kafka, the processor with its three detectors, MongoDB and the REST API of the NLP log pipeline: numbers from Prometheus, logs from Loki.",
+  "description": "Producer, Kafka, the processor with LogBERT, MongoDB and the REST API of the NLP log pipeline: numbers from Prometheus, logs from Loki.",
   "tags": [
     "nlp"
   ],
@@ -563,7 +563,7 @@
       "id": 11,
       "type": "timeseries",
       "title": "Processor: log lines per second",
-      "description": "What the processor reads from Kafka and stores in MongoDB each second, and how many of those lines carry an alert tag in the dataset (the ground truth: the detectors never see it).",
+      "description": "What the processor reads from Kafka and stores in MongoDB each second, and how many of those lines carry an alert tag in the dataset (the ground truth: LogBERT never sees it).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -817,7 +817,7 @@
     {
       "id": 14,
       "type": "row",
-      "title": "The detectors",
+      "title": "LogBERT",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -895,8 +895,8 @@
     {
       "id": 16,
       "type": "timeseries",
-      "title": "Windows flagged per minute, by detector",
-      "description": "How many of those windows each detector called anomalous: LogBERT (model A+), the rule-guided LLM (B3, its saved decisions) and the keyword rules (B4). The windows that really hold an alert line are in the table of  make results.",
+      "title": "Windows flagged per minute",
+      "description": "How many windows LogBERT (model A+) called anomalous. The windows that really hold an alert line are in the table of  make results.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -954,30 +954,6 @@
           "editorMode": "code",
           "range": true,
           "instant": false
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum(increase(processor_windows_flagged_total{detector=\"llm\"}[1m])) or vector(0)",
-          "legendFormat": "rule-guided LLM (B3)",
-          "editorMode": "code",
-          "range": true,
-          "instant": false
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum(increase(processor_windows_flagged_total{detector=\"keyword\"}[1m])) or vector(0)",
-          "legendFormat": "keyword rules (B4)",
-          "editorMode": "code",
-          "range": true,
-          "instant": false
         }
       ]
     },
@@ -985,7 +961,7 @@
       "id": 17,
       "type": "timeseries",
       "title": "LogBERT: seconds per window",
-      "description": "Time LogBERT needs to score one window (the keyword rules and the saved LLM decisions are lookups and take no measurable time). Long windows are cut into chunks and take longer; the NLP project reports 27 ms per window on average.",
+      "description": "Time LogBERT needs to score one window. Long windows are cut into chunks and take longer; the NLP project reports 27 ms per window on average.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

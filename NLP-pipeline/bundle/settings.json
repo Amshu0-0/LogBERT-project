@@ -1,5 +1,4 @@
 {
-  "keyword_top_k": 30,
   "logbert": {
     "g": 8,
     "r": 8,
